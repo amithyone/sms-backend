@@ -16,3 +16,6 @@ yarn-error.log
 *.cache
 .DS_Store
 Thumbs.db
+
+/bootstrap/cache/*
+!/bootstrap/cache/.gitignore

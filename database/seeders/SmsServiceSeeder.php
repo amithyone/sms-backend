@@ -14,7 +14,7 @@ class SmsServiceSeeder extends Seeder
                 'name' => '5Sim Premium',
                 'provider' => SmsService::PROVIDER_5SIM,
                 'api_key' => env('5SIM_API_KEY', 'your_5sim_api_key_here'),
-                'api_url' => 'https://5sim.net',
+                'api_url' => config('services.sms.5sim.base_url'),
                 'is_active' => true,
                 'priority' => 1,
                 'settings' => [
@@ -27,7 +27,7 @@ class SmsServiceSeeder extends Seeder
                 'name' => 'Dassy SMS',
                 'provider' => SmsService::PROVIDER_DASSY,
                 'api_key' => env('DASSY_API_KEY', 'your_dassy_api_key_here'),
-                'api_url' => 'https://api.dassy.com',
+                'api_url' => config('services.sms.dassy.base_url'),
                 'is_active' => true,
                 'priority' => 2,
                 'settings' => [
@@ -40,7 +40,7 @@ class SmsServiceSeeder extends Seeder
                 'name' => 'Tiger SMS',
                 'provider' => SmsService::PROVIDER_TIGER_SMS,
                 'api_key' => env('TIGER_SMS_API_KEY', 'your_tiger_sms_api_key_here'),
-                'api_url' => 'https://api.tigersms.com',
+                'api_url' => config('services.sms.tiger_sms.base_url'),
                 'is_active' => true,
                 'priority' => 3,
                 'settings' => [

@@ -13,7 +13,9 @@ class Kernel extends HttpKernel
      *
      * @var array<int, class-string|string>
      */
-    protected $middleware = [
+      protected $middleware = [
+        // CORS middleware must be first
+        \Illuminate\Http\Middleware\HandleCors::class,
         // Basic middleware only
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,
         \Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull::class,

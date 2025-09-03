@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 
 class SmsController extends Controller
 {
@@ -23,24 +24,99 @@ class SmsController extends Controller
     }
 
     /**
-     * Get available countries from all SMS providers
+     * Get available countries from SMS providers (optionally scoped to a provider)
      */
-    public function getCountries(): JsonResponse
+    public function getCountries(Request $request): JsonResponse
     {
-        try {
-            $smsServices = SmsService::active()->orderedByPriority()->get();
-            $countries = [];
+        $validator = Validator::make($request->all(), [
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms',
+        ]);
 
-            foreach ($smsServices as $smsService) {
-                $providerCountries = $this->smsProviderService->getCountries($smsService);
-                foreach ($providerCountries as $country) {
-                    $country['provider'] = $smsService->provider;
-                    $countries[] = $country;
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $provider = $request->get('provider');
+
+            $countries = Cache::remember("sms:countries:" . ($provider ?: 'all'), 300, function () use ($provider) {
+                $query = SmsService::active()->orderedByPriority();
+                if ($provider) {
+                    $query->byProvider($provider);
+                }
+                $smsServices = $query->get();
+                $countries = [];
+                foreach ($smsServices as $smsService) {
+                    $providerCountries = $this->smsProviderService->getCountries($smsService);
+                    foreach ($providerCountries as $country) {
+                        $country['code'] = $country['code'] ?? ($country['iso'] ?? $country['id'] ?? null);
+                        $country['name'] = $country['name'] ?? ($country['country'] ?? $country['title'] ?? '');
+                        $country['provider'] = $smsService->provider;
+                        if ($country['code'] && $country['name']) {
+                            $countries[] = $country;
+                        }
+                    }
+                }
+                return $countries;
+            });
+
+            // Overlay DB-known country names for the provider
+            if ($provider) {
+                $map = DB::table('sms_countries')
+                    ->where('provider', $provider)
+                    ->pluck('name', 'country_id');
+                $countries = collect($countries)->map(function ($c) use ($map) {
+                    $cid = (string)$c['code'];
+                    if (isset($map[$cid])) { $c['name'] = $map[$cid]; }
+                    return $c;
+                })->all();
+
+                // Fallback: if no countries resolved from provider API, use curated list only
+                if (empty($countries) && $map->isNotEmpty()) {
+                    $countries = $map->map(function ($name, $cid) use ($provider) {
+                        return ['code' => (string)$cid, 'name' => $name, 'provider' => $provider];
+                    })->values()->all();
                 }
             }
 
-            // Remove duplicates and sort by name
-            $countries = collect($countries)->unique('code')->sortBy('name')->values();
+            // If provider specified, restrict to curated countries in DB
+            if ($provider) {
+                $curated = DB::table('sms_countries')
+                    ->where('provider', $provider)
+                    ->pluck('name', 'country_id');
+                if ($curated->isNotEmpty()) {
+                    $countries = collect($countries)->filter(function ($c) use ($curated) {
+                        return $curated->has((string)$c['code']);
+                    })->map(function ($c) use ($curated) {
+                        $cid = (string)$c['code'];
+                        if ($curated->has($cid)) { $c['name'] = $curated[$cid]; }
+                        return $c;
+                    })->values();
+                }
+            }
+
+            // Remove duplicates by code and sort by curated weight then name
+            $weightOrder = [
+                '187','16','36','175','43','78','48','86','56','95','53','111','100','145','13','62','19','31','21','37','8','38','22','3','6','4','10','182','190','52','7','60','66','54','12','1001'
+            ];
+            $weightMap = [];
+            foreach ($weightOrder as $idx => $id) { $weightMap[$id] = $idx; }
+
+            $countries = collect($countries)
+                ->unique('code')
+                ->sort(function ($a, $b) use ($weightMap) {
+                    $wa = $weightMap[$a['code']] ?? 9999;
+                    $wb = $weightMap[$b['code']] ?? 9999;
+                    if ($wa === $wb) {
+                        return strcmp($a['name'], $b['name']);
+                    }
+                    return $wa <=> $wb;
+                })
+                ->values();
 
             return response()->json([
                 'success' => true,
@@ -95,8 +171,50 @@ class SmsController extends Controller
                 }
             }
 
-            // Remove duplicates and sort by cost
-            $services = collect($services)->unique('service')->sortBy('cost')->values();
+            // Overlay service friendly names if available
+            $friendlyRows = DB::table('sms_service_codes')
+                ->whereIn('provider', $smsServices->pluck('provider')->unique())
+                ->get(['code','name']);
+            $friendlyNames = $friendlyRows->pluck('name', 'code');
+            $svcWeights = [];
+            foreach ($friendlyRows as $row) { $svcWeights[$row->code] = $svcWeights[$row->code] ?? count($svcWeights); }
+
+            $services = collect($services)
+                ->map(function ($s) use ($friendlyNames) {
+                    $code = $s['service'] ?? null;
+                    if ($code && isset($friendlyNames[$code])) {
+                        $s['name'] = $friendlyNames[$code];
+                    }
+                    return $s;
+                })
+                // Remove duplicates and sort by cost
+                ->unique('service')
+                ->sort(function ($a, $b) use ($svcWeights) {
+                    $wa = $svcWeights[$a['service']] ?? 9999;
+                    $wb = $svcWeights[$b['service']] ?? 9999;
+                    if ($wa === $wb) {
+                        return ($a['cost'] <=> $b['cost']);
+                    }
+                    return $wa <=> $wb;
+                })
+                ->values();
+
+            // Fallback: if no services returned, surface curated service codes with placeholder pricing
+            if ($services->isEmpty()) {
+                $curated = DB::table('sms_service_codes')
+                    ->whereIn('provider', $smsServices->pluck('provider')->unique())
+                    ->get(['code','name']);
+                if ($curated->isNotEmpty()) {
+                    $services = $curated->map(function ($row) {
+                        return [
+                            'service' => $row->code,
+                            'name' => $row->name,
+                            'cost' => 0,
+                            'count' => 0,
+                        ];
+                    })->values();
+                }
+            }
 
             return response()->json([
                 'success' => true,
@@ -271,6 +389,91 @@ class SmsController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to create SMS order: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Countries filtered by service (service-first flow)
+     * GET /api/sms/countries-by-service?service=wa&provider=tiger_sms
+     */
+    public function getCountriesByService(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'service' => 'required|string',
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $service = strtolower($request->get('service'));
+            $provider = $request->get('provider');
+
+            $query = SmsService::active();
+            if ($provider) {
+                $query->byProvider($provider);
+            } else {
+                $query->orderedByPriority();
+            }
+
+            $smsServices = $query->get();
+            $cacheKey = 'sms:countries_by_service:' . ($provider ?: 'all') . ':' . $service;
+            $results = Cache::remember($cacheKey, 300, function () use ($smsServices, $service) {
+                $acc = [];
+                foreach ($smsServices as $smsService) {
+                    $rows = $this->smsProviderService->getCountriesByService($smsService, $service);
+                    foreach ($rows as $row) {
+                        $row['provider'] = $smsService->provider;
+                        $acc[] = $row;
+                    }
+                }
+                return $acc;
+            });
+
+            // Deduplicate by country_id+provider and sort by cost asc then count desc
+            $results = collect($results)
+                ->unique(function ($r) { return ($r['provider'] ?? '') . '|' . ($r['country_id'] ?? ''); })
+                ->sort(function ($a, $b) {
+                    $cmp = ($a['cost'] <=> $b['cost']);
+                    return $cmp !== 0 ? $cmp : ($b['count'] <=> $a['count']);
+                })
+                ->values();
+
+            // Fallback: curated countries if provider returned empty
+            if ($results->isEmpty()) {
+                $provList = $provider ? [$provider] : $smsServices->pluck('provider')->unique()->values()->all();
+                $curated = collect();
+                foreach ($provList as $prov) {
+                    $rows = DB::table('sms_countries')->where('provider', $prov)->get(['country_id','name']);
+                    foreach ($rows as $r) {
+                        $curated->push([
+                            'provider' => $prov,
+                            'country_id' => (string)$r->country_id,
+                            'country_name' => $r->name,
+                            'cost' => 0,
+                            'count' => 0,
+                        ]);
+                    }
+                }
+                $results = $curated->unique(function ($r) { return ($r['provider'] ?? '') . '|' . ($r['country_id'] ?? ''); })->values();
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $results,
+                'message' => 'Countries by service retrieved successfully'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to retrieve countries by service: ' . $e->getMessage()
             ], 500);
         }
     }
@@ -504,7 +707,7 @@ class SmsController extends Controller
     {
         try {
             $providers = SmsService::active()
-                ->select('id', 'name', 'provider', 'success_rate', 'total_orders', 'successful_orders', 'balance', 'last_balance_check')
+                ->select('id', 'name', 'provider', 'success_rate', 'total_orders', 'successful_orders', 'last_balance_check')
                 ->orderBy('success_rate', 'desc')
                 ->orderBy('priority', 'asc')
                 ->get()
@@ -516,9 +719,9 @@ class SmsController extends Controller
                         'success_rate' => $provider->success_rate,
                         'total_orders' => $provider->total_orders,
                         'successful_orders' => $provider->successful_orders,
-                        'balance' => $provider->balance,
+                        // Do not expose balance to clients
                         'last_balance_check' => $provider->last_balance_check,
-                        'status' => $provider->balance > 0 ? 'available' : 'low_balance',
+                        'status' => 'available',
                         'display_name' => $provider->name . ' (' . number_format($provider->success_rate, 1) . '% success)'
                     ];
                 });

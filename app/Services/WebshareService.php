@@ -2,9 +2,10 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Exception;
+use App\Services\ConfigurationService;
+use App\Services\SimpleHttpClient;
 
 class WebshareService
 {
@@ -14,14 +15,17 @@ class WebshareService
 
     public function __construct()
     {
-        $this->baseUrl = 'https://proxy.webshare.io/api/v2';
-        $this->apiKey = env('WEBSHARE_API_KEY');
+        $this->baseUrl = ConfigurationService::getServiceBaseUrl('proxy', 'webshare');
+        $this->apiKey = ConfigurationService::getServiceApiKey('proxy', 'webshare');
         
-        $this->httpClient = Http::withHeaders([
-            'Authorization' => 'Token ' . $this->apiKey,
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-        ])->timeout(30);
+        $this->httpClient = new SimpleHttpClient([
+            'headers' => [
+                'Authorization' => 'Token ' . $this->apiKey,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ],
+            'timeout' => 30,
+        ]);
     }
 
     /**

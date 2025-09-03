@@ -2,9 +2,10 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Exception;
+use App\Services\ConfigurationService;
+use App\Services\SimpleHttpClient;
 
 class IrechargeService
 {
@@ -15,14 +16,24 @@ class IrechargeService
 
     public function __construct()
     {
-        $this->baseUrl = env('IRECHARGE_BASE_URL', 'https://irecharge.com.ng/pwr_api_sandbox/');
-        $this->username = env('IRECHARGE_USERNAME');
-        $this->password = env('IRECHARGE_PASSWORD');
+        $this->baseUrl = ConfigurationService::getServiceBaseUrl('vtu', 'irecharge');
+        $this->username = config('services.vtu.irecharge.username');
+        $this->password = config('services.vtu.irecharge.password');
         
-        $this->httpClient = Http::withHeaders([
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-        ])->timeout(30);
+        $this->httpClient = new SimpleHttpClient([
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ],
+            'timeout' => 30,
+        ]);
+    }
+
+    public function setProviderConfig($provider): void
+    {
+        $this->baseUrl = rtrim($provider->api_url, '/') . '/';
+        $this->username = $provider->username;
+        $this->password = $provider->password;
     }
 
     /**
@@ -30,6 +41,9 @@ class IrechargeService
      */
     public function getAirtimeNetworks(): array
     {
+        if (stripos($this->baseUrl, 'pwr_api') !== false) {
+            return [];
+        }
         try {
             $response = $this->httpClient->post($this->baseUrl . 'get_airtime_networks.php', [
                 'username' => $this->username,
@@ -62,6 +76,9 @@ class IrechargeService
      */
     public function getDataNetworks(): array
     {
+        if (stripos($this->baseUrl, 'pwr_api') !== false) {
+            return [];
+        }
         try {
             $response = $this->httpClient->post($this->baseUrl . 'get_data_networks.php', [
                 'username' => $this->username,

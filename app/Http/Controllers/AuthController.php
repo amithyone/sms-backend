@@ -90,16 +90,16 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $credentials = $validator->validated();
+        $data = $validator->validated();
 
-        if (!Auth::attempt($credentials)) {
+        $user = User::where('email', $data['email'])->first();
+
+        if (!$user || !Hash::check($data['password'], $user->password)) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Invalid credentials'
             ], 401);
         }
-
-        $user = Auth::user();
 
         if (!$user->isActive()) {
             return response()->json([
