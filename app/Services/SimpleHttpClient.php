@@ -40,7 +40,7 @@ class SimpleHttpResponse
 class SimpleHttpClient
 {
 	private array $defaultHeaders = [];
-	private int $timeoutSeconds = 30;
+	private int $timeoutSeconds = 12;
 
 	public function __construct(array $options = [])
 	{
@@ -124,7 +124,12 @@ class SimpleHttpClient
 		curl_setopt($ch, CURLOPT_URL, $url);
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+		// Total timeout and connection timeout
 		curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeoutSeconds);
+		curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, max(1, min(5, $this->timeoutSeconds - 1)));
+		// Abort if transfer is too slow for too long
+		curl_setopt($ch, CURLOPT_LOW_SPEED_LIMIT, 1);
+		curl_setopt($ch, CURLOPT_LOW_SPEED_TIME, max(5, (int) floor($this->timeoutSeconds / 2)));
 		curl_setopt($ch, CURLOPT_HTTPHEADER, $headersList);
 
 		if ($method !== 'GET') {
@@ -138,7 +143,7 @@ class SimpleHttpClient
 		curl_close($ch);
 
 		if ($responseBody === false) {
-			$responseBody = json_encode(['error' => $error ?: 'HTTP request failed']);
+			$responseBody = json_encode(['error' => $error ?: 'HTTP request failed or timed out']);
 		}
 
 		return new SimpleHttpResponse($statusCode, (string) $responseBody, []);
