@@ -164,7 +164,17 @@ class ApiService {
   }
 
   public async initiateTopUp(body: InitiateTopUpBody, init?: RequestInit) {
-    return this.request<InitiateTopUpData>('/payvibe-initiate.php', {
+    // Use Laravel protected endpoint (requires auth)
+    return this.request<InitiateTopUpData>('/wallet/topup/initiate', {
+      method: 'POST',
+      body: JSON.stringify({ amount: body.amount }),
+      ...init,
+    });
+  }
+
+  public async initiateTopUpPublic(body: InitiateTopUpBody, init?: RequestInit) {
+    // Temporary public endpoint for testing without auth
+    return this.request<InitiateTopUpData>('/wallet/topup/initiate-public', {
       method: 'POST',
       body: JSON.stringify(body),
       ...init,
@@ -172,7 +182,8 @@ class ApiService {
   }
 
   public async checkPaymentStatus(body: VerifyPaymentBody, init?: RequestInit) {
-    return this.request<VerifyPaymentData>('/payvibe-verify.php', {
+    // Use Laravel verify endpoint
+    return this.request<VerifyPaymentData>('/wallet/topup/verify', {
       method: 'POST',
       body: JSON.stringify(body),
       ...init,
