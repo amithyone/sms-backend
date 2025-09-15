@@ -1,0 +1,71 @@
+<?php
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\AdminController;
+
+/*
+|--------------------------------------------------------------------------
+| Web Routes
+|--------------------------------------------------------------------------
+|
+| This is an API backend. Web routes are disabled.
+| Use /api/* endpoints instead.
+|
+*/
+
+Route::get('/', function () {
+    return response()->json([
+        'message' => 'FaddedSMS API Backend',
+        'version' => '1.0.0',
+        'status' => 'running',
+        'endpoints' => [
+            'api' => '/api',
+            'test' => '/api/test',
+            'services' => '/api/services',
+            'admin' => '/admin'
+        ]
+    ]);
+});
+
+/*
+|--------------------------------------------------------------------------
+| Admin Routes
+|--------------------------------------------------------------------------
+|
+| Admin panel routes for managing the system
+|
+*/
+
+// Admin login page (public)
+Route::get('/admin/login', function () {
+    return view('admin.login');
+});
+
+Route::prefix('admin')->middleware(['auth:sanctum', 'admin'])->group(function () {
+    // Dashboard
+    Route::get('/', [AdminController::class, 'dashboard']);
+    Route::get('/dashboard', [AdminController::class, 'dashboard']);
+    
+    // User management
+    Route::get('/users', [AdminController::class, 'users']);
+    Route::get('/users/{id}', [AdminController::class, 'getUser']);
+    Route::put('/users/{id}/status', [AdminController::class, 'updateUserStatus']);
+    Route::put('/users/{id}/role', [AdminController::class, 'updateUserRole']);
+    
+    // Transaction management
+    Route::get('/transactions', [AdminController::class, 'transactions']);
+    
+    // Deposit management
+    Route::get('/deposits', [AdminController::class, 'deposits']);
+    Route::put('/deposits/{id}/status', [AdminController::class, 'updateDepositStatus']);
+    
+    // Statistics
+    Route::get('/statistics', [AdminController::class, 'statistics']);
+});
+
+Route::get('/login', function () {
+    return response()->json(['message' => 'Login route for redirects'], 200);
+})->name('login');
+
+use App\\Http\\Controllers\\AuthController;
+Route::post('/login', [AuthController::class, 'login']);

@@ -1,0 +1,219 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+
+class WalletController extends Controller
+{
+    public function getRecentDeposits(Request $request): JsonResponse
+    {
+        $user = Auth::user();
+        $deposits = DB::table('deposits')
+            ->where('user_id', $user->id)
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get();
+
+        $formattedDeposits = $deposits->map(function ($deposit) {
+            return [
+                'id' => $deposit->id,
+                'amount' => (float) $deposit->amount,
+                'reference' => (string) $deposit->reference,
+                'status' => (string) $deposit->status,
+                'created_at' => (string) $deposit->created_at,
+            ];
+        })->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => $formattedDeposits,
+            'message' => 'Recent deposits retrieved successfully'
+        ]);
+    }
+
+    public function initiateTopUp(Request $request): JsonResponse
+    {
+        $user = Auth::user();
+        
+        $validated = $request->validate([
+            'amount' => 'required|integer|min:100|max:1000000'
+        ]);
+
+        $amount = (int) $validated['amount'];
+        $reference = 'PAYVIBE_' . time() . '_' . rand(1000, 9999);
+
+        try {
+            // Call PayVibe API to create virtual account
+            $response = Http::withHeaders([
+                'Authorization' => 'Bearer ' . env('PAYVIBE_SECRET_KEY'),
+                'Content-Type' => 'application/json',
+                'X-Api-Key' => env('PAYVIBE_PUBLIC_KEY'),
+                'Accept' => 'application/json'
+            ])->post(env('PAYVIBE_BASE_URL') . '/api/v1/payments/virtual-accounts/initiate', [
+                'amount' => $amount,
+                'reference' => $reference,
+                'customer_reference' => 'USER_' . $user->id,
+                'product_identifier' => env('PAYVIBE_PRODUCT_IDENTIFIER', 'sms')
+            ]);
+
+            if (!$response->successful()) {
+                Log::error('PayVibe API Error', [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+                
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Failed to create virtual account'
+                ], 500);
+            }
+
+            $responseData = $response->json();
+            
+            // Store deposit record
+            $depositId = DB::table('deposits')->insertGetId([
+                'user_id' => $user->id,
+                'amount' => $amount,
+                'reference' => $reference,
+                'status' => 'pending',
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
+
+            return response()->json([
+                'status' => 'success',
+                'data' => [
+                    'reference' => $reference,
+                    'account_number' => $responseData['data']['virtual_account_number'] ?? 'N/A',
+                    'bank_name' => $responseData['data']['bank_name'] ?? 'N/A',
+                    'account_name' => $responseData['data']['account_name'] ?? 'N/A',
+                    'amount' => $amount,
+                    'status' => $responseData['data']['status'] ?? 'pending',
+                    'expiry' => 1800,
+                    'transaction_id' => $depositId
+                ],
+                'message' => 'Virtual account created successfully'
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('PayVibe Initiate Error', [
+                'error' => $e->getMessage(),
+                'reference' => $reference
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to create virtual account'
+            ], 500);
+        }
+    }
+
+    public function verifyTopUp(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'reference' => 'required|string'
+        ]);
+
+        $reference = $validated['reference'];
+        $deposit = DB::table('deposits')->where('reference', $reference)->first();
+
+        if (!$deposit) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Transaction not found'
+            ], 404);
+        }
+
+        if ($deposit->status === 'completed') {
+            return response()->json([
+                'status' => 'success',
+                'data' => [
+                    'status' => 'completed',
+                    'amount' => (float) $deposit->amount
+                ]
+            ]);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'status' => 'pending',
+                'amount' => (float) $deposit->amount
+            ]
+        ]);
+    }
+
+    public function handlePayVibeWebhook(Request $request): JsonResponse
+    {
+        try {
+            $payload = $request->all();
+            
+            Log::info('PayVibe Webhook Received', $payload);
+
+            $reference = $payload['reference'] ?? null;
+            $status = $payload['status'] ?? null;
+            $amount = $payload['transaction_amount'] ?? null;
+
+            if (!$reference) {
+                return response()->json(['status' => 'error', 'message' => 'Missing reference'], 400);
+            }
+
+            $deposit = DB::table('deposits')->where('reference', $reference)->first();
+
+            if (!$deposit) {
+                Log::warning('PayVibe Webhook: Deposit not found', ['reference' => $reference]);
+                return response()->json(['status' => 'error', 'message' => 'Deposit not found'], 404);
+            }
+
+            if ($deposit->status === 'completed') {
+                return response()->json(['status' => 'success', 'message' => 'Already processed']);
+            }
+
+            // Update deposit status
+            DB::table('deposits')->where('id', $deposit->id)->update([
+                'status' => 'completed',
+                'updated_at' => now()
+            ]);
+
+            // Credit user wallet
+            DB::table('users')->where('id', $deposit->user_id)->increment('balance', $deposit->amount);
+
+            Log::info('PayVibe Webhook: Payment processed', [
+                'reference' => $reference,
+                'user_id' => $deposit->user_id,
+                'amount' => $deposit->amount
+            ]);
+
+            return response()->json(['status' => 'success', 'message' => 'Payment processed']);
+
+        } catch (\Exception $e) {
+            Log::error('PayVibe Webhook Error', [
+                'error' => $e->getMessage(),
+                'payload' => $request->all()
+            ]);
+
+            return response()->json(['status' => 'error', 'message' => 'Webhook processing failed'], 500);
+        }
+    }
+}
+
+    private function calculateCharges(\)
+    {
+        if (\ >= 1000 && \ <= 10000) {
+            return (\ * 0.015) + 100;
+        } elseif (\ > 10000 && \ <= 20000) {
+            return (\ * 0.015) + 200;
+        } elseif (\ > 20000 && \ <= 40000) {
+            return (\ * 0.015) + 300;
+        } else {
+            return (\ * 0.02) + 200;
+        }
+    }
+}

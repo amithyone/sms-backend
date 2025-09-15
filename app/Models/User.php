@@ -86,6 +86,14 @@ class User extends Authenticatable
     }
 
     /**
+     * Get user's deposits
+     */
+    public function deposits(): HasMany
+    {
+        return $this->hasMany(Deposit::class);
+    }
+
+    /**
      * Check if user is admin
      */
     public function isAdmin(): bool

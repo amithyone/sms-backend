@@ -13,6 +13,7 @@ use App\Services\Sms\Providers\TigerSmsProvider;
 use App\Services\Sms\Providers\FiveSimProvider;
 use App\Services\Sms\Providers\DassyProvider;
 use App\Services\Sms\Providers\TextVerifiedProvider;
+use App\Services\Sms\Providers\SmsPoolProvider;
 
 class SmsProviderService
 {
@@ -29,6 +30,7 @@ class SmsProviderService
             SmsService::PROVIDER_5SIM => new FiveSimProvider(),
             SmsService::PROVIDER_DASSY => new DassyProvider(),
             SmsService::PROVIDER_TEXTVERIFIED => new TextVerifiedProvider(),
+            SmsService::PROVIDER_SMSPOOL => new SmsPoolProvider(),
         ];
     }
 

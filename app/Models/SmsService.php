@@ -42,6 +42,8 @@ class SmsService extends Model
     const PROVIDER_5SIM = '5sim';
     const PROVIDER_DASSY = 'dassy';
     const PROVIDER_TIGER_SMS = 'tiger_sms';
+    const PROVIDER_TEXTVERIFIED = 'textverified';
+    const PROVIDER_SMSPOOL = 'smspool';
 
     public function orders(): HasMany
     {

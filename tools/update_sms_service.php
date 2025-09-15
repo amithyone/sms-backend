@@ -54,4 +54,23 @@ if (!empty($tvKey) && !empty($tvUser)) {
     echo "TEXTVERIFIED_API_KEY or TEXTVERIFIED_API_USERNAME missing in .env\n";
 }
 
+// Update or create SMSPool provider
+$spKey = env('SMSPOOL_API_KEY', '');
+if (!empty($spKey)) {
+    $sp = SmsService::query()->where('provider', SmsService::PROVIDER_SMSPOOL)->first();
+    if (!$sp) {
+        $sp = new SmsService();
+        $sp->name = 'SMSPool';
+        $sp->provider = SmsService::PROVIDER_SMSPOOL;
+        $sp->priority = 25;
+    }
+    $sp->api_url = 'https://api.smspool.net';
+    $sp->api_key = $spKey;
+    $sp->is_active = true;
+    $sp->save();
+    echo "Updated SMSPool provider id={$sp->id}\n";
+} else {
+    echo "SMSPOOL_API_KEY not set in .env (optional)\n";
+}
+
 

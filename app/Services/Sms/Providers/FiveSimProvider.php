@@ -68,22 +68,67 @@ class FiveSimProvider implements ProviderInterface
     public function getServices(SmsService $smsService, string $country): array
     {
         $config = $smsService->getApiConfig();
-        // JSON products endpoint first
-        $response = $this->httpClient
-            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
-            ->get($config['api_url'] . "/v1/guest/products/{$country}/any");
+        // JSON products endpoint first (use 5SIM country slug when possible)
+        $countrySlug = null;
+        if (!is_numeric($country)) {
+            $countrySlug = strtolower((string)$country);
+        } else {
+            $map = [
+                '187' => 'usa',
+                '19' => 'nigeria',
+                '38' => 'ghana',
+                '31' => 'south-africa',
+                '8' => 'kenya',
+                '21' => 'egypt',
+                '16' => 'uk',
+                '4' => 'philippines',
+                '6' => 'indonesia',
+                '22' => 'india',
+            ];
+            $countrySlug = $map[(string)$country] ?? null;
+        }
+
+        $response = null;
+        if ($countrySlug) {
+            $response = $this->httpClient
+                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+                ->get($config['api_url'] . "/v1/guest/products/{$countrySlug}/any");
+        } else {
+            $response = $this->httpClient
+                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+                ->get($config['api_url'] . "/v1/guest/products/{$country}/any");
+        }
 
         if ($response->successful()) {
             $data = $response->json();
             if (is_array($data) && !empty($data)) {
-                return collect($data)->map(function ($service) {
-                    return [
-                        'name' => $service['name'],
-                        'service' => $service['service'],
-                        'cost' => $service['price'],
-                        'count' => $service['count'] ?? 0
-                    ];
-                })->toArray();
+                // Handle both list and associative map shapes
+                $out = [];
+                $isAssoc = array_keys($data) !== range(0, count($data) - 1);
+                if ($isAssoc) {
+                    foreach ($data as $product => $info) {
+                        if (!is_array($info)) continue;
+                        $out[] = [
+                            'name' => $info['name'] ?? ucfirst((string)$product),
+                            'service' => $info['service'] ?? (string)$product,
+                            'cost' => isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0),
+                            'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
+                        ];
+                    }
+                } else {
+                    foreach ($data as $info) {
+                        if (!is_array($info)) continue;
+                        $out[] = [
+                            'name' => $info['name'] ?? ($info['service'] ?? 'Service'),
+                            'service' => $info['service'] ?? ($info['code'] ?? 'unknown'),
+                            'cost' => isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0),
+                            'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
+                        ];
+                    }
+                }
+                if (!empty($out)) {
+                    return $out;
+                }
             }
         }
 
@@ -118,14 +163,36 @@ class FiveSimProvider implements ProviderInterface
                 if ($row && isset($row->name)) {
                     $countryName = strtolower($row->name);
                 } else {
-                    $countryName = is_numeric($country) ? null : strtolower((string)$country);
+                    if (is_numeric($country)) {
+                        // Map common Tiger-style numeric country IDs to 5SIM country slugs
+                        $idToName = [
+                            '187' => 'united states',
+                            '19' => 'nigeria',
+                            '38' => 'ghana',
+                            '31' => 'south africa',
+                            '8' => 'kenya',
+                            '21' => 'egypt',
+                            '16' => 'united kingdom',
+                            '4' => 'philippines',
+                            '6' => 'indonesia',
+                            '22' => 'india',
+                        ];
+                        $countryName = $idToName[(string)$country] ?? null;
+                    } else {
+                        $countryName = strtolower((string)$country);
+                    }
                 }
                 if ($countryName) {
+                    // Enrich costs for a limited subset to avoid long sequential calls
+                    $enriched = 0;
                     foreach ($services as &$svc) {
-                        $prices = $this->getPricesByProduct($config, $svc['service'], $countryName);
+                        if ($enriched >= 20) { break; }
+                        $product = $this->mapServiceCodeToProduct($svc['service']);
+                        $prices = $this->getPricesByProduct($config, $product, $countryName);
                         if (!empty($prices) && isset($prices[0]['cost'])) {
                             $svc['cost'] = (float)$prices[0]['cost'];
                         }
+                        $enriched++;
                     }
                     unset($svc);
                 }
@@ -283,4 +350,32 @@ class FiveSimProvider implements ProviderInterface
         }
         return $result;
     }
+
+    /**
+     * Map generic service code to 5SIM product slug where they differ.
+     */
+    private function mapServiceCodeToProduct(string $code): string
+    {
+        $map = [
+            'wa' => 'whatsapp',
+            'fb' => 'facebook',
+            'ig' => 'instagram',
+            'go' => 'google',
+            'aky' => 'google',
+            'tg' => 'telegram',
+            'tw' => 'twitter',
+            'rm' => 'facebook',
+            'mc' => 'microsoft',
+            'cd' => 'spotify',
+            'xz' => 'payoneer',
+            'yo' => 'amazon',
+            'ij' => 'robinhood',
+            'bp' => 'gojek',
+            'ub' => 'ubisoft',
+            'wa_0' => 'whatsapp',
+        ];
+        return $map[$code] ?? $code;
+    }
+
+    // (duplicate removed)
 }

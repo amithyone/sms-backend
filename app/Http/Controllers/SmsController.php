@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class SmsController extends Controller
 {
@@ -29,7 +30,7 @@ class SmsController extends Controller
     public function getCountries(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms',
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms,textverified,smspool',
         ]);
 
         if ($validator->fails()) {
@@ -139,7 +140,7 @@ class SmsController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'country' => 'required|string|max:10',
-            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms'
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms,textverified,smspool'
         ]);
 
         if ($validator->fails()) {
@@ -153,6 +154,9 @@ class SmsController extends Controller
         try {
             $country = $request->country;
             $provider = $request->provider;
+
+            // Provider selection: if none specified, query all active providers.
+            // Do not force a single provider by country; let the aggregator merge results.
 
             $query = SmsService::active()->orderedByPriority();
             if ($provider) {
@@ -178,6 +182,22 @@ class SmsController extends Controller
             $friendlyNames = $friendlyRows->pluck('name', 'code');
             $svcWeights = [];
             foreach ($friendlyRows as $row) { $svcWeights[$row->code] = $svcWeights[$row->code] ?? count($svcWeights); }
+
+            // Persist price cache per provider-country
+            try {
+                $priceCache = app(\App\Services\Sms\PriceCacheService::class);
+                foreach ($smsServices as $svcModel) {
+                    $prov = $svcModel->provider;
+                    $provRows = array_values(array_filter($services, function ($r) use ($prov) {
+                        return is_array($r) && ($r['provider'] ?? '') === $prov;
+                    }));
+                    if (!empty($provRows)) {
+                        $priceCache->upsertPrices($prov, $country, $provRows);
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Price cache upsert skipped', ['error' => $e->getMessage()]);
+            }
 
             $services = collect($services)
                 ->map(function ($s) use ($friendlyNames) {
@@ -235,10 +255,17 @@ class SmsController extends Controller
      */
     public function createOrder(Request $request): JsonResponse
     {
+        Log::info("=== SMS ORDER ENDPOINT CALLED ===", [
+            'timestamp' => now(),
+            'request_data' => $request->all(),
+            'user_agent' => $request->header('User-Agent'),
+            'ip' => $request->ip()
+        ]);
+        
         $validator = Validator::make($request->all(), [
             'country' => 'required|string|max:10',
             'service' => 'required|string',
-            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms',
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms,textverified,smspool',
             'mode' => 'nullable|string|in:auto,manual'
         ]);
 
@@ -268,6 +295,14 @@ class SmsController extends Controller
             // Get available SMS services based on mode
             $query = SmsService::active();
             
+            Log::info("SMS Order Request", [
+                'user_id' => $user->id,
+                'country' => $country,
+                'service' => $service,
+                'provider' => $provider,
+                'mode' => $mode
+            ]);
+            
             if ($mode === 'manual') {
                 // Manual mode: Use specific provider if provided, otherwise show error
                 if (!$provider) {
@@ -277,12 +312,27 @@ class SmsController extends Controller
                     ], 400);
                 }
                 $query->byProvider($provider);
+                Log::info("Manual mode: Filtering by provider", ['provider' => $provider]);
             } else {
                 // Auto mode: Get all active services, ordered by success rate and priority
                 $query->orderedByPriority();
+                Log::info("Auto mode: Getting all providers by priority");
             }
 
             $smsServices = $query->get();
+            
+            Log::info("Available SMS Services", [
+                'count' => $smsServices->count(),
+                'services' => $smsServices->map(function($service) {
+                    return [
+                        'id' => $service->id,
+                        'name' => $service->name,
+                        'provider' => $service->provider,
+                        'priority' => $service->priority,
+                        'is_active' => $service->is_active
+                    ];
+                })->toArray()
+            ]);
 
             if ($smsServices->isEmpty()) {
                 $errorMessage = $mode === 'manual' 
@@ -303,6 +353,13 @@ class SmsController extends Controller
             // Try to create order with each service until successful
             foreach ($smsServices as $smsService) {
                 try {
+                    Log::info("Attempting to create order with provider", [
+                        'provider' => $smsService->provider,
+                        'provider_name' => $smsService->name,
+                        'priority' => $smsService->priority,
+                        'mode' => $mode
+                    ]);
+                    
                     $orderData = $this->smsProviderService->createOrder($smsService, $country, $service);
                     
                     // Create order in database
@@ -401,7 +458,7 @@ class SmsController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'service' => 'required|string',
-            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms'
+            'provider' => 'nullable|string|in:5sim,dassy,tiger_sms,textverified,smspool'
         ]);
 
         if ($validator->fails()) {

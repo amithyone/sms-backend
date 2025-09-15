@@ -48,6 +48,20 @@ class SmsServiceSeeder extends Seeder
                     'retry_attempts' => 3,
                     'auto_cancel' => true
                 ]
+            ],
+            [
+                'name' => 'TextVerified',
+                'provider' => SmsService::PROVIDER_TEXTVERIFIED,
+                'api_key' => env('TEXTVERIFIED_API_KEY', 'your_textverified_api_key_here'),
+                'api_url' => 'https://www.textverified.com/api/v2',
+                'is_active' => true,
+                'priority' => 4,
+                'settings' => [
+                    'timeout' => 30,
+                    'retry_attempts' => 3,
+                    'auto_cancel' => true,
+                    'username' => env('TEXTVERIFIED_API_USERNAME', 'your_textverified_username_here')
+                ]
             ]
         ];
 
@@ -63,5 +77,6 @@ class SmsServiceSeeder extends Seeder
         $this->command->info('- 5SIM_API_KEY');
         $this->command->info('- DASSY_API_KEY');
         $this->command->info('- TIGER_SMS_API_KEY');
+        $this->command->info('- TEXTVERIFIED_API_KEY');
     }
 }

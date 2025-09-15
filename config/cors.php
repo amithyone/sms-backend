@@ -32,10 +32,10 @@ return [
 
     'allowed_origins_patterns' => [
         // Allow any subdomain of your main domain
-        'https://*.fadsms.com',
+        '/^https:\/\/([a-z0-9-]+\.)*fadsms\.com$/i',
         // Allow any localhost with any port
-        'http://localhost:*',
-        'http://127.0.0.1:*',
+        '/^http:\/\/localhost(:\d+)?$/',
+        '/^http:\/\/127\.0\.0\.1(:\d+)?$/',
     ],
 
     'allowed_headers' => ['*'],

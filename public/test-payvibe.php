@@ -1,0 +1,1 @@
+<?php return [" account_number\ => \1234567890\, \bank_name\ => \Wema Bank\, \account_name\ => \Finspa/PAYVIBE\, \reference\ => \TEST_REF_123\, \amount\ => 2000, \charge\ => 130, \final_amount\ => 2130];

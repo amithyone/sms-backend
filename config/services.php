@@ -43,7 +43,7 @@ return [
             'api_key' => env('5SIM_API_KEY'),
         ],
         'dassy' => [
-            'base_url' => env('DASSY_BASE_URL', 'https://api.dassy.com'),
+            'base_url' => env('DASSY_BASE_URL', 'https://daisysms.com/stubs/handler_api.php'),
             'api_key' => env('DASSY_API_KEY'),
         ],
         'tiger_sms' => [

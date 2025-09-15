@@ -38,7 +38,7 @@ Route::get('/cors-test', function () {
 
 // Auth routes
 Route::post('/register', [AuthController::class, 'register']);
-Route::post('/login', [AuthController::class, 'login']);
+Route::post('/login', [AuthController::class, 'login'])->name('login');
 Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
 
 // Public VTU routes - Basic service information
@@ -51,6 +51,8 @@ Route::get('/betting/providers', [VtuController::class, 'getBettingProviders']);
 Route::get('/vtu/betting/providers', [VtuController::class, 'getBettingProviders']);
 Route::get('/electricity/providers', [VtuController::class, 'getElectricityProviders']);
 Route::get('/vtu/electricity/providers', [VtuController::class, 'getElectricityProviders']);
+
+// Phone validation - public route\nRoute::post(" /vtu/validate/phone, [VtuController::class, alidatePhoneNumber]);
 
 // Protected routes
 Route::middleware('auth:sanctum')->group(function () {
@@ -79,7 +81,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/vtu/airtime/purchase', [VtuController::class, 'purchaseAirtime']);
     Route::post('/vtu/data/purchase', [VtuController::class, 'purchaseDataBundle']);
     Route::get('/vtu/transaction/status', [VtuController::class, 'getTransactionStatus']);
-    Route::post('/vtu/validate/phone', [VtuController::class, 'validatePhoneNumber']);
     Route::post('/verify-customer', [VtuController::class, 'verifyCustomer']);
     Route::post('/betting/purchase', [VtuController::class, 'purchaseBetting']);
     Route::post('/vtu/verify-customer', [VtuController::class, 'verifyCustomer']);

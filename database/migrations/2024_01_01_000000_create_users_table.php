@@ -20,7 +20,6 @@ return new class extends Migration
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->decimal('balance', 15, 2)->default(0.00);
-            $table->decimal('wallet_balance', 15, 2)->default(0.00);
             $table->string('account_number')->nullable()->unique();
             $table->string('bank_name')->nullable();
             $table->string('account_name')->nullable();

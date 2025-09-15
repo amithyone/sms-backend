@@ -1,0 +1,1 @@
+SELECT * FROM sms_services WHERE provider = " textverified\;

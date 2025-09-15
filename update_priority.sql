@@ -1,0 +1,1 @@
+UPDATE sms_services SET priority = 1 WHERE provider = " textverified\;
