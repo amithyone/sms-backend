@@ -31,11 +31,13 @@ class SmsController extends Controller
     {
         // Defaults
         $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
+        $fxFloor = (float) (config('services.sms_fx.min_ngn_per_usd', 1200));
+        if ($fx < $fxFloor) { $fx = $fxFloor; }
         $markupPct = (float) (config('services.sms_markup.percent', 0));
 
         // Provider-specific overrides (optional future use)
         $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
-        if ($provFx > 0) { $fx = $provFx; }
+        if ($provFx > 0) { $fx = max($provFx, $fxFloor); }
         $provMarkup = (float) (config("services.sms_markup.providers.{$provider}", -1));
         if ($provMarkup >= 0) { $markupPct = $provMarkup; }
 

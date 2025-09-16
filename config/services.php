@@ -57,6 +57,8 @@ return [
         'ngn_per_usd' => env('SMS_FX_NGN_PER_USD', 1600),
         // How many USD per 1 RUB (RUB → USD). Example: 0.011 means 1 RUB = $0.011
         'usd_per_rub' => env('SMS_FX_USD_PER_RUB', 0.011),
+        // Do not allow FX below this floor to avoid underpricing
+        'min_ngn_per_usd' => env('SMS_FX_MIN_NGN_PER_USD', 1200),
         'providers' => [
             // 'dassy' => 1600,
         ],
