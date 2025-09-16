@@ -68,24 +68,43 @@ class FiveSimProvider implements ProviderInterface
     public function getServices(SmsService $smsService, string $country): array
     {
         $config = $smsService->getApiConfig();
-        // JSON products endpoint first (use 5SIM country slug when possible)
+        // JSON products endpoint first (use 5SIM country slug only if valid)
         $countrySlug = null;
         if (!is_numeric($country)) {
             $countrySlug = strtolower((string)$country);
         } else {
+            // Minimal numeric->slug mapping (USA intentionally not mapped as 5SIM does not support it)
             $map = [
-                '187' => 'usa',
                 '19' => 'nigeria',
                 '38' => 'ghana',
                 '31' => 'south-africa',
-                '8' => 'kenya',
+                '8'  => 'kenya',
                 '21' => 'egypt',
                 '16' => 'uk',
-                '4' => 'philippines',
-                '6' => 'indonesia',
+                '4'  => 'philippines',
+                '6'  => 'indonesia',
                 '22' => 'india',
             ];
             $countrySlug = $map[(string)$country] ?? null;
+        }
+
+        // Validate slug against official 5SIM countries; if invalid, avoid bad requests
+        if ($countrySlug) {
+            $countriesResp = $this->httpClient
+                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+                ->get($config['api_url'] . '/v1/guest/countries');
+            if ($countriesResp->successful()) {
+                $list = $countriesResp->json();
+                $slugs = [];
+                if (is_array($list)) {
+                    foreach ($list as $row) {
+                        if (is_array($row) && !empty($row['country'])) { $slugs[strtolower($row['country'])] = true; }
+                    }
+                }
+                if (empty($slugs[$countrySlug])) {
+                    $countrySlug = null; // slug not supported by 5SIM
+                }
+            }
         }
 
         $response = null;
@@ -94,9 +113,8 @@ class FiveSimProvider implements ProviderInterface
                 ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
                 ->get($config['api_url'] . "/v1/guest/products/{$countrySlug}/any");
         } else {
-            $response = $this->httpClient
-                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
-                ->get($config['api_url'] . "/v1/guest/products/{$country}/any");
+            // No valid slug for 5SIM: return empty to avoid failed number requests
+            return [];
         }
 
         if ($response->successful()) {
@@ -213,28 +231,42 @@ class FiveSimProvider implements ProviderInterface
     public function createOrder(SmsService $smsService, string $country, string $service): array
     {
         $config = $smsService->getApiConfig();
-        $handlerBase = (string)($config['api_url'] ?? 'http://api1.5sim.net/stubs/handler_api.php');
-        if (stripos($handlerBase, 'handler_api.php') === false) {
-            $handlerBase = rtrim($handlerBase, '/') . '/stubs/handler_api.php';
+        // Prefer official JSON API (avoids Cloudflare on handler API)
+        $apiBase = rtrim((string)($config['api_url'] ?? 'https://5sim.net'), '/');
+
+        // Determine country slug; validate against official list
+        $countrySlug = null;
+        if (!is_numeric($country)) { $countrySlug = strtolower((string)$country); }
+        $countriesResp = $this->httpClient
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+            ->get($apiBase . '/v1/guest/countries');
+        if ($countriesResp->successful()) {
+            $valid = [];
+            $list = $countriesResp->json();
+            if (is_array($list)) {
+                foreach ($list as $row) {
+                    if (is_array($row) && !empty($row['country'])) { $valid[strtolower($row['country'])] = true; }
+                }
+            }
+            if (!$countrySlug || empty($valid[$countrySlug])) {
+                // Reject if unsupported to avoid guaranteed failures
+                throw new Exception('5SIM does not support country: ' . (string)$country);
+            }
         }
-        $url = $handlerBase
-            . '?api_key=' . urlencode((string)($config['api_key'] ?? ''))
-            . '&action=getNumber'
-            . '&service=' . urlencode($service)
-            . '&country=' . urlencode($country);
 
-        $resp = $this->httpClient->get($url);
-        $body = trim($resp->body());
-        Log::info('5SIM getNumber HTTP', [ 'url' => $url, 'status' => $resp->status(), 'body_sample' => substr($body, 0, 300) ]);
+        $product = $this->mapServiceCodeToProduct($service);
+        $buyUrl = $apiBase . '/v1/user/buy/activation?country=' . urlencode($countrySlug) . '&operator=any&product=' . urlencode($product);
+        $resp = $this->httpClient
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
+            ->post($buyUrl);
+        Log::info('5SIM buy activation HTTP', [ 'url' => preg_replace('/(api_key|Authorization)=[^&]*/i', '$1=***', $buyUrl), 'status' => $resp->status(), 'body_sample' => substr($resp->body(), 0, 500) ]);
 
-        if ($resp->successful() && stripos($body, 'ACCESS_NUMBER') === 0) {
-            $parts = explode(':', $body);
-            $orderId = $parts[1] ?? null;
-            $phone = $parts[2] ?? null;
-            if ($orderId && $phone) {
+        if ($resp->successful()) {
+            $data = $resp->json();
+            if (is_array($data) && !empty($data['id']) && !empty($data['phone'])) {
                 return [
-                    'order_id' => $orderId,
-                    'phone_number' => $phone,
+                    'order_id' => (string)$data['id'],
+                    'phone_number' => (string)$data['phone'],
                     'cost' => 0,
                     'status' => 'active',
                     'expires_at' => now()->addMinutes(20)
@@ -242,7 +274,7 @@ class FiveSimProvider implements ProviderInterface
             }
         }
 
-        throw new Exception('Failed to create 5Sim order: ' . $body);
+        throw new Exception('Failed to create 5Sim order: HTTP ' . $resp->status());
     }
 
     public function getSmsCode(SmsService $smsService, string $orderId): ?string
