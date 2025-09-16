@@ -28,7 +28,12 @@ class DassyProvider implements ProviderInterface
                 $countries = [];
                 foreach ($data as $countryCode => $services) {
                     if (is_array($services) && !empty($services)) {
-                        $countries[] = [ 'code' => (string)$countryCode, 'name' => 'Country ' . (string)$countryCode ];
+                        [$iso2, $friendly] = $this->mapCountry((string)$countryCode);
+                        $countries[] = [
+                            'code' => (string)$countryCode,   // Daisy expects numeric code in subsequent calls
+                            'name' => $friendly,               // Friendly display name for frontend
+                            'code2' => $iso2,                  // Optional ISO2 for consumers that need it
+                        ];
                     }
                 }
                 return $countries;
@@ -133,5 +138,19 @@ class DassyProvider implements ProviderInterface
             }
         }
         return 0.0;
+    }
+
+    /**
+     * Map Daisy numeric country code to ISO2 and friendly name
+     */
+    private function mapCountry(string $daisyCode): array
+    {
+        // Minimal mapping; extend as needed. 187 is USA per Daisy/SMS-Activate.
+        $map = [
+            '187' => ['US', 'United States'],
+            // Add more Daisy numeric codes here if needed
+        ];
+        if (isset($map[$daisyCode])) return $map[$daisyCode];
+        return ['', 'Country ' . $daisyCode];
     }
 }
