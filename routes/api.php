@@ -56,7 +56,7 @@ Route::get('/debug/sms/providers', [DebugSmsController::class, 'providers']);
 
 // Auth routes
 Route::post('/register', [AuthController::class, 'register']);
-Route::post('/login', [AuthController::class, 'login'])->name('login');
+Route::post('/login', [AuthController::class, 'login'])->name('api.login');
 Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
 
 // Admin login route (same as regular login but returns admin info)
