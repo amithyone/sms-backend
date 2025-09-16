@@ -28,7 +28,14 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 
 // Public API routes
 Route::get('/test', [ApiController::class, 'test']);
+Route::get('/servers', [SmsController::class, 'getServers']);
 Route::get('/services', [ApiController::class, 'getServices']);
+
+// Test route to verify getServers method works
+Route::get('/test-servers', function() {
+    $controller = new \App\Http\Controllers\SmsController(new \App\Services\SmsProviderService());
+    return $controller->getServers();
+});
 
 // CORS test route
 Route::get('/cors-test', function () {
@@ -73,6 +80,9 @@ Route::get('/sms/services', [SmsController::class, 'getServices']);
 Route::post('/sms/services', [SmsController::class, 'getServices']);
 Route::get('/sms/countries', [SmsController::class, 'getCountries']);
 Route::get('/sms/countries-by-service', [SmsController::class, 'getCountriesByService']);
+
+// Server list endpoint for frontend - moved to top of file
+// Route::get('/servers', [SmsController::class, 'getServers']); // Moved to line 31
 
 // Phone validation - public route (FIXME: previously malformed)
 // Route::post('/vtu/validate/phone', [VtuController::class, 'validatePhoneNumber']);

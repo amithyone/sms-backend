@@ -798,6 +798,81 @@ class SmsController extends Controller
     }
 
     /**
+     * Get server list for frontend display
+     * This endpoint provides the server list that the frontend expects
+     */
+    public function getServers(): JsonResponse
+    {
+        try {
+            $servers = SmsService::active()
+                ->select('id', 'name', 'provider', 'success_rate', 'total_orders', 'successful_orders', 'priority', 'created_at')
+                ->orderBy('priority', 'asc')
+                ->orderBy('success_rate', 'desc')
+                ->get()
+                ->map(function ($server) {
+                    return [
+                        'id' => $server->id,
+                        'name' => $server->name,
+                        'display_name' => $server->name, // Use the name column as display name
+                        'provider' => $server->provider,
+                        'success_rate' => $server->success_rate,
+                        'total_orders' => $server->total_orders,
+                        'successful_orders' => $server->successful_orders,
+                        'status' => 'active',
+                        'priority' => $server->priority,
+                        'location' => $this->getServerLocation($server->provider),
+                        'region' => $this->getServerRegion($server->provider),
+                        'created_at' => $server->created_at
+                    ];
+                });
+
+            return response()->json([
+                'status' => 'success',
+                'data' => $servers,
+                'message' => 'Servers retrieved successfully'
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to retrieve servers: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get server location based on provider
+     */
+    private function getServerLocation(string $provider): string
+    {
+        $locations = [
+            '5sim' => 'Global',
+            'tiger_sms' => 'Global',
+            'dassy' => 'Global',
+            'textverified' => 'United States',
+            'smspool' => 'Global'
+        ];
+
+        return $locations[$provider] ?? 'Global';
+    }
+
+    /**
+     * Get server region based on provider
+     */
+    private function getServerRegion(string $provider): string
+    {
+        $regions = [
+            '5sim' => 'Global',
+            'tiger_sms' => 'Global',
+            'dassy' => 'Global',
+            'textverified' => 'North America',
+            'smspool' => 'Global'
+        ];
+
+        return $regions[$provider] ?? 'Global';
+    }
+
+    /**
      * Get SMS service statistics
      */
     public function getStats(): JsonResponse
