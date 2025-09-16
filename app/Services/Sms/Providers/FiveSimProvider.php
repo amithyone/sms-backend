@@ -108,20 +108,26 @@ class FiveSimProvider implements ProviderInterface
                 if ($isAssoc) {
                     foreach ($data as $product => $info) {
                         if (!is_array($info)) continue;
+                        $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
+                        $usdCost = (isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0)) * max($usdPerRub, 0.00001);
                         $out[] = [
                             'name' => $info['name'] ?? ucfirst((string)$product),
                             'service' => $info['service'] ?? (string)$product,
-                            'cost' => isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0),
+                            'cost' => $usdCost,
+                            'currency' => 'USD',
                             'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
                         ];
                     }
                 } else {
                     foreach ($data as $info) {
                         if (!is_array($info)) continue;
+                        $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
+                        $usdCost = (isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0)) * max($usdPerRub, 0.00001);
                         $out[] = [
                             'name' => $info['name'] ?? ($info['service'] ?? 'Service'),
                             'service' => $info['service'] ?? ($info['code'] ?? 'unknown'),
-                            'cost' => isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0),
+                            'cost' => $usdCost,
+                            'currency' => 'USD',
                             'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
                         ];
                     }

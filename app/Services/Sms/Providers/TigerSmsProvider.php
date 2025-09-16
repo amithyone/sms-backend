@@ -142,10 +142,14 @@ class TigerSmsProvider implements ProviderInterface
             }
 
             if (!is_string($serviceCode)) continue;
+            // Convert RUB → USD → NGN upstream? Keep as USD here; controller will convert to NGN
+            $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
+            $usdCost = $cost !== null ? ((float)$cost * max($usdPerRub, 0.00001)) : 0.0;
             $services[] = [
                 'name' => strtoupper($serviceCode),
                 'service' => $serviceCode,
-                'cost' => $cost !== null ? $cost : 0,
+                'cost' => $usdCost,
+                'currency' => 'USD',
                 'count' => $count,
             ];
         }
