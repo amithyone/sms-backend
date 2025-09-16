@@ -54,11 +54,14 @@ class DassyProvider implements ProviderInterface
                 $services = [];
                 foreach ($data[$country] as $serviceCode => $serviceData) {
                     if (is_array($serviceData) && isset($serviceData['cost'])) {
+                        $usd = (float)$serviceData['cost'];
+                        $ngn = $this->convertToNgn($usd, 'dassy');
                         $services[] = [
                             'service' => $serviceCode,
                             'name' => strtoupper($serviceCode),
-                            'cost' => (float)$serviceData['cost'],
-                            'count' => (int)($serviceData['count'] ?? 0)
+                            'cost' => $ngn,
+                            'count' => (int)($serviceData['count'] ?? 0),
+                            'currency' => 'NGN',
                         ];
                     }
                 }
@@ -152,5 +155,23 @@ class DassyProvider implements ProviderInterface
         ];
         if (isset($map[$daisyCode])) return $map[$daisyCode];
         return ['', 'Country ' . $daisyCode];
+    }
+
+    /**
+     * Convert USD provider price to NGN using global config and markup
+     */
+    private function convertToNgn(float $usd, string $provider): float
+    {
+        $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
+        $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
+        if ($provFx > 0) { $fx = $provFx; }
+
+        $markup = (float) (config('services.sms_markup.percent', 0));
+        $provMarkup = (float) (config("services.sms_markup.providers.{$provider}", -1));
+        if ($provMarkup >= 0) { $markup = $provMarkup; }
+
+        $ngn = $usd * $fx;
+        if ($markup > 0) { $ngn *= (1 + $markup / 100); }
+        return (float) ceil($ngn);
     }
 }
