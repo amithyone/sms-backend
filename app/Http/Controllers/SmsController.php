@@ -25,6 +25,29 @@ class SmsController extends Controller
     }
 
     /**
+     * Convert provider-native price to NGN using configured FX and markup
+     */
+    private function convertPriceToNgn(float $baseCost, string $provider): float
+    {
+        // Defaults
+        $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
+        $markupPct = (float) (config('services.sms_markup.percent', 0));
+
+        // Provider-specific overrides (optional future use)
+        $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
+        if ($provFx > 0) { $fx = $provFx; }
+        $provMarkup = (float) (config("services.sms_markup.providers.{$provider}", -1));
+        if ($provMarkup >= 0) { $markupPct = $provMarkup; }
+
+        $ngn = $baseCost * $fx;
+        if ($markupPct > 0) {
+            $ngn = $ngn * (1 + ($markupPct / 100));
+        }
+        // Round up to nearest 1 NGN to avoid fractional kobo noise
+        return (float) ceil($ngn);
+    }
+
+    /**
      * Get available countries from SMS providers (optionally scoped to a provider)
      */
     public function getCountries(Request $request): JsonResponse
@@ -56,6 +79,7 @@ class SmsController extends Controller
                     foreach ($providerCountries as $country) {
                         $country['code'] = $country['code'] ?? ($country['iso'] ?? $country['id'] ?? null);
                         $country['name'] = $country['name'] ?? ($country['country'] ?? $country['title'] ?? '');
+                        // Force provider attribution to current service to avoid mixed data
                         $country['provider'] = $smsService->provider;
                         if ($country['code'] && $country['name']) {
                             $countries[] = $country;
@@ -119,6 +143,15 @@ class SmsController extends Controller
                 })
                 ->values();
 
+            // Hard filter by provider, if explicitly requested
+            if ($provider) {
+                $countries = collect($countries)
+                    ->filter(function ($row) use ($provider) {
+                        return is_array($row) && (($row['provider'] ?? '') === $provider);
+                    })
+                    ->values();
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $countries,
@@ -155,8 +188,7 @@ class SmsController extends Controller
             $country = $request->country;
             $provider = $request->provider;
 
-            // Provider selection: if none specified, query all active providers.
-            // Do not force a single provider by country; let the aggregator merge results.
+            // Provider selection: if specified, strictly scope to that provider.
 
             $query = SmsService::active()->orderedByPriority();
             if ($provider) {
@@ -169,6 +201,7 @@ class SmsController extends Controller
             foreach ($smsServices as $smsService) {
                 $providerServices = $this->smsProviderService->getServices($smsService, $country);
                 foreach ($providerServices as $service) {
+                    // Force provider attribution to current service to avoid mixed data
                     $service['provider'] = $smsService->provider;
                     $service['provider_name'] = $smsService->name;
                     $services[] = $service;
@@ -200,10 +233,29 @@ class SmsController extends Controller
             }
 
             $services = collect($services)
+                // Hard filter if provider explicitly requested
+                ->when(!empty($provider), function ($c) use ($provider) {
+                    return $c->filter(function ($row) use ($provider) {
+                        return is_array($row) && (($row['provider'] ?? '') === $provider);
+                    });
+                })
                 ->map(function ($s) use ($friendlyNames) {
                     $code = $s['service'] ?? null;
                     if ($code && isset($friendlyNames[$code])) {
                         $s['name'] = $friendlyNames[$code];
+                    }
+                    return $s;
+                })
+                // Convert prices to NGN for USD-based providers with markup
+                ->map(function ($s) use ($provider) {
+                    try {
+                        $prov = $s['provider'] ?? $provider ?? null;
+                        if ($prov && isset($s['cost'])) {
+                            $s['cost'] = $this->convertPriceToNgn((float)$s['cost'], (string)$prov);
+                            $s['currency'] = 'NGN';
+                        }
+                    } catch (\Throwable $e) {
+                        // Leave original cost on error
                     }
                     return $s;
                 })
@@ -279,8 +331,8 @@ class SmsController extends Controller
 
         try {
             $user = Auth::user();
-            $country = $request->country;
-            $service = $request->service;
+            $country = strtoupper($request->country);
+            $service = (string) $request->service;
             $provider = $request->provider;
             $mode = $request->mode ?? 'auto'; // Default to auto mode
 
@@ -290,6 +342,24 @@ class SmsController extends Controller
                     'success' => false,
                     'message' => 'Insufficient balance. Please recharge your account.'
                 ], 400);
+            }
+
+            // Provider-specific payload validation to avoid mixed/invalid combos
+            if ($provider === 'textverified') {
+                if ($country !== 'US') {
+                    return response()->json(['success' => false, 'message' => 'TextVerified requires US.'], 422);
+                }
+                if (preg_match('/^\d+$/', $service)) {
+                    return response()->json(['success' => false, 'message' => 'TextVerified requires serviceName (string), not numeric code.'], 422);
+                }
+            }
+            if (in_array($provider, ['tiger_sms', '5sim', 'dassy'])) {
+                if (preg_match('/^\d+$/', $service)) {
+                    return response()->json(['success' => false, 'message' => 'Selected provider requires a string service code (e.g., whatsapp).'], 422);
+                }
+            }
+            if ($provider === 'smspool') {
+                // smspool accepts numeric service codes; no additional guard
             }
 
             // Get available SMS services based on mode
@@ -487,6 +557,7 @@ class SmsController extends Controller
                 foreach ($smsServices as $smsService) {
                     $rows = $this->smsProviderService->getCountriesByService($smsService, $service);
                     foreach ($rows as $row) {
+                        // Force provider attribution to current service to avoid mixed data
                         $row['provider'] = $smsService->provider;
                         $acc[] = $row;
                     }
@@ -496,6 +567,12 @@ class SmsController extends Controller
 
             // Deduplicate by country_id+provider and sort by cost asc then count desc
             $results = collect($results)
+                // Hard filter if provider explicitly requested
+                ->when(!empty($provider), function ($c) use ($provider) {
+                    return $c->filter(function ($row) use ($provider) {
+                        return is_array($row) && (($row['provider'] ?? '') === $provider);
+                    });
+                })
                 ->unique(function ($r) { return ($r['provider'] ?? '') . '|' . ($r['country_id'] ?? ''); })
                 ->sort(function ($a, $b) {
                     $cmp = ($a['cost'] <=> $b['cost']);

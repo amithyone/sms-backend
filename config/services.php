@@ -52,6 +52,20 @@ return [
         ],
     ],
 
+    // Global FX and markup for SMS prices
+    'sms_fx' => [
+        'ngn_per_usd' => env('SMS_FX_NGN_PER_USD', 1600),
+        'providers' => [
+            // 'dassy' => 1600,
+        ],
+    ],
+    'sms_markup' => [
+        'percent' => env('SMS_MARKUP_PERCENT', 0),
+        'providers' => [
+            // 'dassy' => 10,
+        ],
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | VTU Services Configuration
