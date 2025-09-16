@@ -250,7 +250,13 @@ class SmsController extends Controller
                 ->map(function ($s) use ($provider) {
                     try {
                         $prov = $s['provider'] ?? $provider ?? null;
-                        if ($prov && isset($s['cost'])) {
+                        $currency = $s['currency'] ?? null;
+                        // If provider handles conversion (e.g., dassy), do not convert here
+                        if ($prov && strtolower((string)$prov) === 'dassy') {
+                            return $s;
+                        }
+                        // Convert ONLY if backend did not already convert to NGN
+                        if ($prov && isset($s['cost']) && ($currency === null || strtoupper((string)$currency) !== 'NGN')) {
                             $s['cost'] = $this->convertPriceToNgn((float)$s['cost'], (string)$prov);
                             $s['currency'] = 'NGN';
                         }
