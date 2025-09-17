@@ -446,6 +446,34 @@ class SmsController extends Controller
                     ]);
                     
                     $orderData = $this->smsProviderService->createOrder($smsService, $country, $service);
+
+                    // Determine charge in NGN if provider didn't supply it
+                    $charge = (float)($orderData['cost'] ?? 0);
+                    if ($charge <= 0) {
+                        try {
+                            $svcRows = $this->smsProviderService->getServices($smsService, $country);
+                            foreach ($svcRows as $row) {
+                                if (isset($row['service']) && (string)$row['service'] === (string)$service) {
+                                    $rowCost = (float)($row['cost'] ?? 0);
+                                    $rowCurrency = strtoupper((string)($row['currency'] ?? ''));
+                                    if ($rowCost > 0) {
+                                        if ($rowCurrency === 'NGN') {
+                                            $charge = $rowCost;
+                                        } else {
+                                            $charge = $this->convertPriceToNgn($rowCost, (string)$smsService->provider);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        } catch (\Throwable $e) {
+                            // Leave $charge as 0 on failure; will be handled below
+                        }
+                    }
+                    if ($charge <= 0) {
+                        throw new \RuntimeException('Could not determine SMS price for charge');
+                    }
+                    $orderData['cost'] = (float) ceil($charge);
                     
                     // Create order in database
                     $order = SmsOrder::create([
