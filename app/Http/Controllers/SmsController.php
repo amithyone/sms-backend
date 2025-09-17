@@ -45,6 +45,13 @@ class SmsController extends Controller
         if ($markupPct > 0) {
             $ngn = $ngn * (1 + ($markupPct / 100));
         }
+        // Fixed VAT/add-on from settings table (sms_vat), default NGN 700
+        try {
+            $vat = (float) (DB::table('settings')->where('key', 'sms_vat')->value('value') ?? 700);
+            if ($vat > 0) { $ngn += $vat; }
+        } catch (\Throwable $e) {
+            $ngn += 700; // fallback if settings table unavailable
+        }
         // Round up to nearest 1 NGN to avoid fractional kobo noise
         return (float) ceil($ngn);
     }

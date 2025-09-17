@@ -6,6 +6,7 @@ use App\Models\SmsService;
 use App\Services\SimpleHttpClient;
 use App\Services\Sms\ProviderInterface;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 use Exception;
 
 class DassyProvider implements ProviderInterface
@@ -172,6 +173,13 @@ class DassyProvider implements ProviderInterface
 
         $ngn = $usd * $fx;
         if ($markup > 0) { $ngn *= (1 + $markup / 100); }
+        // Fixed VAT/add-on from settings table (sms_vat), default NGN 700
+        try {
+            $vat = (float) (DB::table('settings')->where('key', 'sms_vat')->value('value') ?? 700);
+            if ($vat > 0) { $ngn += $vat; }
+        } catch (\Throwable $e) {
+            $ngn += 700; // fallback if settings table unavailable
+        }
         return (float) ceil($ngn);
     }
 }
