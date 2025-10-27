@@ -8,10 +8,10 @@
 </head>
 <body class="min-h-screen bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center p-4">
 	<div class="w-full max-w-md">
-		<div class="bg-white/90 backdrop-blur rounded-2xl shadow-xl p-8">
+		<div class="bg-white/90 backdrop-blur rounded-2xl shadow-xl p-6 sm:p-8">
 			<div class="text-center mb-6">
-				<div class="text-3xl font-bold text-indigo-600">🔆 Fadded VIP</div>
-				<div class="text-slate-500">Admin Panel Login</div>
+				<div class="text-2xl sm:text-3xl font-bold text-indigo-600">🔆 Fadded VIP</div>
+				<div class="text-slate-500 text-sm sm:text-base">Admin Panel Login</div>
 			</div>
 
 			<div id="errorMessage" class="hidden bg-rose-50 text-rose-600 border border-rose-200 rounded-md px-3 py-2 mb-3 text-sm"></div>
@@ -20,13 +20,13 @@
 			<form id="loginForm" class="space-y-4">
 				<label class="block">
 					<span class="text-sm text-slate-600">Email Address</span>
-					<input type="email" id="email" name="email" required class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+					<input type="email" id="email" name="email" required class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500" />
 				</label>
 				<label class="block">
 					<span class="text-sm text-slate-600">Password</span>
-					<input type="password" id="password" name="password" required class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+					<input type="password" id="password" name="password" required class="mt-1 w-full rounded-md border border-slate-300 px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500" />
 				</label>
-				<button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md py-2" id="loginBtn">
+				<button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-md py-2.5 text-base" id="loginBtn">
 					Login to Admin Panel
 					<span class="hidden ml-2 align-middle" id="loading">
 						<svg class="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">

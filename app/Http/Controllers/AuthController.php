@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\Transaction;
+use App\Services\V1SyncService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
@@ -13,6 +14,12 @@ use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
+    private $v1Sync;
+
+    public function __construct(V1SyncService $v1Sync)
+    {
+        $this->v1Sync = $v1Sync;
+    }
     /**
      * User registration
      */
@@ -53,7 +60,7 @@ class AuthController extends Controller
             'referral_code' => Str::random(8),
             'referred_by' => $referredBy?->id,
             'balance' => 0.00,
-            'wallet_balance' => 0.00,
+            
             'status' => 'active',
             'role' => 'user',
         ]);
@@ -65,7 +72,7 @@ class AuthController extends Controller
             'status' => 'success',
             'message' => 'User registered successfully',
             'data' => [
-                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'wallet_balance', 'referral_code']),
+                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'referral_code']),
                 'token' => $token,
                 'token_type' => 'Bearer'
             ]
@@ -73,7 +80,7 @@ class AuthController extends Controller
     }
 
     /**
-     * User login
+     * User login - Supports both V1 and V2 users
      */
     public function login(Request $request): JsonResponse
     {
@@ -91,14 +98,23 @@ class AuthController extends Controller
         }
 
         $data = $validator->validated();
+        $user = null;
 
-        $user = User::where('email', $data['email'])->first();
+        // Try V1 authentication first (if V1 sync is enabled)
+        if (env('V1_API_URL') && env('V1_SYNC_API_KEY')) {
+            $user = $this->v1Sync->authenticateUser($data['email'], $data['password']);
+        }
 
-        if (!$user || !Hash::check($data['password'], $user->password)) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Invalid credentials'
-            ], 401);
+        // If V1 auth fails, try local V2 authentication
+        if (!$user) {
+            $user = User::where('email', $data['email'])->first();
+
+            if (!$user || !Hash::check($data['password'], $user->password)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Invalid credentials'
+                ], 401);
+            }
         }
 
         if (!$user->isActive()) {
@@ -118,7 +134,7 @@ class AuthController extends Controller
             'status' => 'success',
             'message' => 'Login successful',
             'data' => [
-                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'wallet_balance', 'referral_code', 'role']),
+                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'referral_code', 'role']),
                 'token' => $token,
                 'token_type' => 'Bearer'
             ]
@@ -154,7 +170,7 @@ class AuthController extends Controller
         return response()->json([
             'status' => 'success',
             'data' => [
-                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'wallet_balance', 'referral_code', 'role', 'status', 'last_login_at']),
+                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'referral_code', 'role', 'status', 'last_login_at']),
                 'recent_transactions' => $recentTransactions
             ]
         ]);
@@ -190,7 +206,7 @@ class AuthController extends Controller
             'status' => 'success',
             'message' => 'Profile updated successfully',
             'data' => [
-                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'wallet_balance', 'referral_code', 'role', 'account_number', 'bank_name', 'account_name'])
+                'user' => $user->only(['id', 'name', 'email', 'phone', 'username', 'balance', 'referral_code', 'role', 'account_number', 'bank_name', 'account_name'])
             ]
         ]);
     }

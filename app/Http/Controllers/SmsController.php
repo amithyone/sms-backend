@@ -25,15 +25,65 @@ class SmsController extends Controller
     }
 
     /**
-     * Convert provider-native price to NGN using configured FX and markup
+     * Log SMS operation with detailed context
      */
-    private function convertPriceToNgn(float $baseCost, string $provider): float
+    private function logSmsOperation(string $operation, array $context = [], string $level = 'info'): void
     {
-        // Defaults
+        $user = Auth::user();
+        $requestId = request()->header('X-Request-ID', Str::uuid()->toString());
+        
+        $logData = array_merge([
+            'operation' => $operation,
+            'request_id' => $requestId,
+            'user_id' => $user ? $user->id : null,
+            'user_email' => $user ? $user->email : null,
+            'ip' => request()->ip(),
+            'user_agent' => request()->userAgent(),
+            'timestamp' => now()->toISOString(),
+        ], $context);
+
+        Log::channel('sms')->$level("SMS {$operation}", $logData);
+    }
+
+    /**
+     * Log SMS error with detailed context
+     */
+    private function logSmsError(string $operation, \Exception $exception, array $context = []): void
+    {
+        $user = Auth::user();
+        $requestId = request()->header('X-Request-ID', Str::uuid()->toString());
+        
+        $logData = array_merge([
+            'operation' => $operation,
+            'error_type' => get_class($exception),
+            'error_message' => $exception->getMessage(),
+            'error_code' => $exception->getCode(),
+            'error_file' => $exception->getFile(),
+            'error_line' => $exception->getLine(),
+            'error_trace' => $exception->getTraceAsString(),
+            'request_id' => $requestId,
+            'user_id' => $user ? $user->id : null,
+            'user_email' => $user ? $user->email : null,
+            'ip' => request()->ip(),
+            'user_agent' => request()->userAgent(),
+            'timestamp' => now()->toISOString(),
+        ], $context);
+
+        Log::channel('sms')->error("SMS {$operation} Error", $logData);
+        Log::channel('errors')->error("SMS {$operation} Error", $logData);
+    }
+
+    /**
+     * Convert provider-native price to NGN using configured FX and markup
+     * Enforces minimum price of ₦1500 for all SMS services
+     */
+    private function convertPriceToNgn(float $baseCost, string $provider, string $sourceCurrency = 'USD'): float
+    {
+        // Defaults (treat baseCost in USD unless sourceCurrency says otherwise)
         $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
         $fxFloor = (float) (config('services.sms_fx.min_ngn_per_usd', 1200));
         if ($fx < $fxFloor) { $fx = $fxFloor; }
-        $markupPct = (float) (config('services.sms_markup.percent', 0));
+        $markupPct = (float) (config('services.sms_markup.percent', 10));
 
         // Provider-specific overrides (optional future use)
         $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
@@ -41,10 +91,26 @@ class SmsController extends Controller
         $provMarkup = (float) (config("services.sms_markup.providers.{$provider}", -1));
         if ($provMarkup >= 0) { $markupPct = $provMarkup; }
 
-        $ngn = $baseCost * $fx;
+        // Normalize source to USD
+        $usd = $baseCost;
+        $cur = strtoupper((string)$sourceCurrency);
+        if ($cur === 'RUB') {
+            // Convert RUB -> USD using usd_per_rub
+            $usdPerRub = (float) (config('services.sms_fx.usd_per_rub', 0.011));
+            $usd = $baseCost * $usdPerRub;
+        } elseif ($cur === 'NGN') {
+            // Already NGN; skip conversion and return clamps/markup only
+            $usd = $baseCost / max($fx, 1.0);
+        }
+
+        // Convert USD to NGN
+        $ngn = $usd * $fx;
+        
+        // Apply markup percentage
         if ($markupPct > 0) {
             $ngn = $ngn * (1 + ($markupPct / 100));
         }
+        
         // Fixed VAT/add-on from settings table (sms_vat), default NGN 700
         try {
             $vat = (float) (DB::table('settings')->where('key', 'sms_vat')->value('value') ?? 700);
@@ -52,8 +118,178 @@ class SmsController extends Controller
         } catch (\Throwable $e) {
             $ngn += 700; // fallback if settings table unavailable
         }
+        
         // Round up to nearest 1 NGN to avoid fractional kobo noise
-        return (float) ceil($ngn);
+        $ngn = (float) ceil($ngn);
+        
+        // IMPORTANT: Enforce minimum price for all SMS services
+        // Get minimum price from settings table (default ₦1500)
+        try {
+            $minPrice = (float) (DB::table('settings')->where('key', 'sms_min_price')->value('value') ?? 1500);
+        } catch (\Throwable $e) {
+            $minPrice = 1500.0; // fallback if settings table unavailable
+        }
+        
+        if ($ngn < $minPrice) {
+            $ngn = $minPrice;
+        }
+        
+        // NEW: Apply profit margin percentage ON TOP of the final price
+        try {
+            $profitMargin = (float) (DB::table('settings')->where('key', 'sms_profit_margin')->value('value') ?? 15);
+            if ($profitMargin > 0) {
+                $ngn = $ngn * (1 + ($profitMargin / 100));
+                $ngn = (float) ceil($ngn); // Round up again after profit margin
+            }
+        } catch (\Throwable $e) {
+            // If can't get profit margin, apply default 15%
+            $ngn = $ngn * 1.15;
+            $ngn = (float) ceil($ngn);
+        }
+        
+        return $ngn;
+    }
+
+    /**
+     * Check if a service is popular and should be prioritized
+     */
+    private function isPopularService(string $serviceName): bool
+    {
+        $popularServices = [
+            // TOP PRIORITY - Most requested services (All providers)
+            'whatsapp', 'wa', 'telegram', 'tg', 'signal', 'bw',
+            'tinder', 'oi', 'facebook', 'fb', 'google', 'go', 'gmail',
+            'payoneer', 'tiktok', 'lf', 'linkedin', 'tn',
+            
+            // HIGH PRIORITY - Dating and social platforms
+            'bumble', 'mo', 'discord', 'ds', 'instagram', 'ig',
+            'snapchat', 'snap', 'twitter', 'x.com', 'tw',
+            
+            // MEDIUM PRIORITY - Business and entertainment
+            'amazon', 'am', 'uber', 'ub', 'paypal', 'netflix', 'spotify', 'youtube',
+            'googlechat', 'google_voice', 'gf', 'verizon', 'vz',
+            
+            // ADDITIONAL POPULAR SERVICES (All providers)
+            'aarp', 'albertsons', 'biltrewards', 'bright', 'craigslist', 'wc',
+            'docusign', 'evgo', 'fetchrewards', 'frisbee', 'go2bank', 'gofundme',
+            'golden1', 'ajn', 'greenlight', 'innago', 'lego', 'lightningai',
+            'lightstream', 'noonlight', 'vm', 'dr', 'ts', 'pelago', 'playful',
+            'pogo', 'r4r', 'schwab', 'seatgeek', 'fu', 'swag', 'ticketswap',
+            'timewall', 'ufb', 'upward', 'verasight', 'veriswap', 'wallethub',
+            'wr', 'walmartmoneycard', 'wayfair', 'waymo', 'wfargo', 'ago'
+        ];
+
+        foreach ($popularServices as $popular) {
+            if (strpos($serviceName, $popular) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Calculate priority score for service sorting (higher = more important)
+     */
+    private function calculateServicePriority(string $serviceName, array $service): int
+    {
+        $priority = 0;
+        
+        // Popular services get highest priority
+        if ($this->isPopularService($serviceName)) {
+            $priority += 1000;
+            
+            // TOP PRIORITY SERVICES (highest demand)
+            if (strpos($serviceName, 'whatsapp') !== false || strpos($serviceName, 'wa') !== false) {
+                $priority += 1000; // Highest priority
+            }
+            
+            if (strpos($serviceName, 'telegram') !== false || strpos($serviceName, 'tg') !== false) {
+                $priority += 900; // Second highest
+            }
+            
+            if (strpos($serviceName, 'signal') !== false || strpos($serviceName, 'bw') !== false) {
+                $priority += 850; // Third highest
+            }
+            
+            if (strpos($serviceName, 'tinder') !== false || strpos($serviceName, 'oi') !== false) {
+                $priority += 800; // Dating apps high priority
+            }
+            
+            // HIGH PRIORITY SERVICES
+            if (strpos($serviceName, 'facebook') !== false || strpos($serviceName, 'fb') !== false) {
+                $priority += 700;
+            }
+            
+            if (strpos($serviceName, 'google') !== false || strpos($serviceName, 'go') !== false || strpos($serviceName, 'gmail') !== false) {
+                $priority += 650;
+            }
+            
+            if (strpos($serviceName, 'payoneer') !== false) {
+                $priority += 600;
+            }
+            
+            if (strpos($serviceName, 'tiktok') !== false || strpos($serviceName, 'lf') !== false) {
+                $priority += 550;
+            }
+            
+            if (strpos($serviceName, 'linkedin') !== false || strpos($serviceName, 'tn') !== false) {
+                $priority += 500;
+            }
+            
+            // MEDIUM PRIORITY SERVICES
+            if (strpos($serviceName, 'bumble') !== false || strpos($serviceName, 'mo') !== false) {
+                $priority += 450;
+            }
+            
+            if (strpos($serviceName, 'discord') !== false || strpos($serviceName, 'ds') !== false) {
+                $priority += 400;
+            }
+            
+            if (strpos($serviceName, 'instagram') !== false || strpos($serviceName, 'ig') !== false) {
+                $priority += 350;
+            }
+            
+            if (strpos($serviceName, 'amazon') !== false || strpos($serviceName, 'am') !== false) {
+                $priority += 300;
+            }
+            
+            if (strpos($serviceName, 'uber') !== false || strpos($serviceName, 'ub') !== false) {
+                $priority += 250;
+            }
+        }
+        
+        // Consider success rate (if available)
+        if (isset($service['success_rate']) && is_numeric($service['success_rate'])) {
+            $priority += (int)$service['success_rate'];
+        }
+        
+        // Consider provider reliability
+        $provider = $service['provider'] ?? '';
+        switch (strtolower($provider)) {
+            case '5sim':
+                $priority += 200; // High reliability
+                break;
+            case 'smspool':
+                $priority += 150;
+                break;
+            case 'dassy':
+                $priority += 100;
+                break;
+            case 'tigersms':
+                $priority += 50;
+                break;
+        }
+        
+        // Prefer lower cost (better value)
+        if (isset($service['cost']) && is_numeric($service['cost'])) {
+            $cost = (float)$service['cost'];
+            if ($cost > 0) {
+                $priority += max(0, 100 - (int)($cost / 100)); // Lower cost = higher priority
+            }
+        }
+        
+        return $priority;
     }
 
     /**
@@ -75,6 +311,29 @@ class SmsController extends Controller
 
         try {
             $provider = $request->get('provider');
+
+            // 1) Try cache-first for provider-scoped countries
+            if ($provider) {
+                $cachedCountries = DB::table('sms_country_catalog')
+                    ->where('provider', $provider)
+                    ->get(['country_code','country_name']);
+
+                if ($cachedCountries->isNotEmpty()) {
+                    $countries = $cachedCountries->map(function ($row) use ($provider) {
+                        return [
+                            'code' => (string)$row->country_code,
+                            'name' => (string)$row->country_name,
+                            'provider' => $provider,
+                        ];
+                    })->values()->all();
+
+                    return response()->json([
+                        'success' => true,
+                        'data' => $countries,
+                        'message' => 'Countries retrieved from cache'
+                    ]);
+                }
+            }
 
             $countries = Cache::remember("sms:countries:" . ($provider ?: 'all'), 300, function () use ($provider) {
                 $query = SmsService::active()->orderedByPriority();
@@ -118,7 +377,8 @@ class SmsController extends Controller
             }
 
             // If provider specified, restrict to curated countries in DB
-            if ($provider) {
+            // EXCEPTION: For smspool, dassy, tiger_sms, 5sim -> show all provider countries
+            if ($provider && !in_array(strtolower($provider), ['smspool','dassy','tiger_sms','5sim'])) {
                 $curated = DB::table('sms_countries')
                     ->where('provider', $provider)
                     ->pluck('name', 'country_id');
@@ -161,6 +421,20 @@ class SmsController extends Controller
                     ->values();
             }
 
+            // 2) Upsert into country catalog for future cache hits (provider-scoped)
+            if ($provider) {
+                try {
+                    foreach ($countries as $c) {
+                        DB::table('sms_country_catalog')->updateOrInsert(
+                            [ 'provider' => $provider, 'country_code' => (string)$c['code'] ],
+                            [ 'country_name' => (string)$c['name'], 'updated_at' => now(), 'created_at' => now() ]
+                        );
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('Failed upserting sms_country_catalog', ['error' => $e->getMessage(), 'provider' => $provider]);
+                }
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $countries,
@@ -196,19 +470,131 @@ class SmsController extends Controller
         try {
             $country = $request->country;
             $provider = $request->provider;
+            $countryKey = strtoupper((string)$country);
+            $cachedServicesCollection = collect();
+            
+            // PERFORMANCE: Cache key for this request
+            $cacheKey = "sms_services:{$country}:" . ($provider ?? 'all') . ":" . now()->format('Y-m-d-H-i');
+            $cacheDuration = $provider === 'dassy' ? 5 : 15; // Cache DASSY for 5 minutes, others for 15 minutes
+            
+            // Try to get from cache first (for expensive providers)
+            // Temporarily disabled caching for DASSY to fix country filtering issue
+            if ($provider === 'dassy') {
+                // $cached = Cache::get($cacheKey);
+                // if ($cached) {
+                //     return response()->json([
+                //         'success' => true,
+                //         'data' => $cached,
+                //         'cached' => true
+                //     ]);
+                // }
+            }
 
             // Provider selection: if specified, strictly scope to that provider.
 
-            $query = SmsService::active()->orderedByPriority();
+            // Simple cache for slow providers (e.g., smspool)
+            if ($provider && strtolower($provider) !== 'dassy') {
+                $cached = Cache::get($cacheKey);
+                if ($cached) {
+                    return response()->json([
+                        'success' => true,
+                        'data' => $cached,
+                        'cached' => true,
+                        'message' => 'Services retrieved (cached)'
+                    ]);
+                }
+            }
+
+            // 1) Try DB price catalog first for provider+country (cache-first path)
             if ($provider) {
-                $query->byProvider($provider);
+                $priceRows = DB::table('sms_service_country_prices')
+                    ->where('provider', $provider)
+                    ->where('country_code', $countryKey)
+                    ->get(['service','cost','count','last_seen_at','provider_currency']);
+
+                if ($priceRows->isNotEmpty()) {
+                    // Friendly names map
+                    $friendlyRows = DB::table('sms_service_codes')
+                        ->where(function($q) use ($provider) {
+                            $q->where('provider', $provider)->orWhere('provider', 'all');
+                        })
+                        ->get(['code','name']);
+                    $friendlyNames = $friendlyRows->pluck('name','code');
+
+                    // If provider_currency exists in table, fetch it too
+                    $services = $priceRows->map(function ($row) use ($friendlyNames, $provider) {
+                        $code = (string)$row->service;
+                        $name = (string)($friendlyNames[$code] ?? ucfirst($code));
+                        $rowCost = (float)$row->cost;
+                        $currencyCol = property_exists($row, 'provider_currency') ? (string)($row->provider_currency ?? '') : '';
+                        $currency = strtoupper($currencyCol);
+                        // Only convert if currency is USD (or unknown treated as USD); if NGN, use as-is
+                        if ($currency === 'NGN') {
+                            $ngn = $rowCost;
+                        } else {
+                            $src = in_array($currency, ['USD','RUB']) ? $currency : 'USD';
+                            $ngn = $this->convertPriceToNgn($rowCost, (string)$provider, $src);
+                        }
+                        // Clamp
+                        $limits = config('services.sms_price_limits');
+                        $maxNgn = (float)($limits['max_ngn'] ?? 3000000);
+                        $minNgn = (float)($limits['min_ngn'] ?? 1500);
+                        if ($ngn > $maxNgn) { $ngn = $maxNgn; }
+                        if ($ngn < $minNgn) { $ngn = $minNgn; }
+                        return [
+                            'service' => $code,
+                            'name' => $name,
+                            'cost' => $ngn,
+                            'count' => (int)$row->count,
+                            'provider' => $provider,
+                            'provider_name' => DB::table('sms_services')->where('provider',$provider)->value('name') ?? $provider,
+                        ];
+                    })->values();
+
+                    // For most providers, serve catalog immediately; for textverified, keep to merge with live to ensure full list
+                    if (strtolower($provider) !== 'textverified') {
+                        // Cache response for a short period
+                        if (strtolower($provider) !== 'dassy') {
+                            Cache::put($cacheKey, $services, now()->addMinutes(10));
+                        }
+                        return response()->json([
+                            'success' => true,
+                            'data' => $services,
+                            'message' => 'Services retrieved from catalog'
+                        ]);
+                    } else {
+                        $cachedServicesCollection = collect($services);
+                    }
+                }
+            }
+
+            // Build provider query; for providers that don't track balance in DB (dassy, 5sim, textverified),
+            // avoid the active() scope if it enforces balance > 0
+            $balanceAgnostic = $provider && in_array(strtolower($provider), ['dassy','5sim','textverified']);
+            if ($balanceAgnostic) {
+                $query = SmsService::query()->where('provider', $provider)->where('is_active', 1)->orderBy('priority');
+            } else {
+                $query = SmsService::active()->orderedByPriority();
+                if ($provider) {
+                    $query->byProvider($provider);
+                }
             }
 
             $smsServices = $query->get();
             $services = [];
 
             foreach ($smsServices as $smsService) {
+                Log::info('SmsController calling getServices', [
+                    'provider' => $smsService->provider,
+                    'country' => $country,
+                    'service_id' => $smsService->id
+                ]);
                 $providerServices = $this->smsProviderService->getServices($smsService, $country);
+                Log::info('SmsController getServices result', [
+                    'provider' => $smsService->provider,
+                    'country' => $country,
+                    'services_count' => count($providerServices)
+                ]);
                 foreach ($providerServices as $service) {
                     // Force provider attribution to current service to avoid mixed data
                     $service['provider'] = $smsService->provider;
@@ -219,7 +605,11 @@ class SmsController extends Controller
 
             // Overlay service friendly names if available
             $friendlyRows = DB::table('sms_service_codes')
-                ->whereIn('provider', $smsServices->pluck('provider')->unique())
+                ->where(function($query) use ($smsServices) {
+                    $providers = $smsServices->pluck('provider')->unique();
+                    $query->whereIn('provider', $providers)
+                          ->orWhere('provider', 'all');
+                })
                 ->get(['code','name']);
             $friendlyNames = $friendlyRows->pluck('name', 'code');
             $svcWeights = [];
@@ -241,6 +631,11 @@ class SmsController extends Controller
                 Log::warning('Price cache upsert skipped', ['error' => $e->getMessage()]);
             }
 
+            // If we have cached TextVerified services, merge them before normalization to ensure full list
+            if (!empty($provider) && strtolower($provider) === 'textverified' && $cachedServicesCollection->isNotEmpty()) {
+                $services = array_merge($services, $cachedServicesCollection->all());
+            }
+
             $services = collect($services)
                 // Hard filter if provider explicitly requested
                 ->when(!empty($provider), function ($c) use ($provider) {
@@ -248,41 +643,89 @@ class SmsController extends Controller
                         return is_array($row) && (($row['provider'] ?? '') === $provider);
                     });
                 })
+                // PERFORMANCE: Limit services for slow providers to improve response time
+                ->when($provider === 'dassy', function ($c) {
+                    // Ensure top services (WhatsApp, Telegram) are always included
+                    $topServices = $c->filter(function ($s) {
+                        $service = strtolower($s['service'] ?? '');
+                        return in_array($service, ['wa', 'tg', 'fb', 'ig', 'oi', 'go', 'am', 'tn', 'ds', 'bw']);
+                    });
+                    
+                    // Get top 200 services, then add any missing top services
+                    $top200 = $c->take(200);
+                    $missingTopServices = $topServices->reject(function ($service) use ($top200) {
+                        return $top200->contains('service', $service['service']);
+                    });
+                    
+                    return $top200->concat($missingTopServices)->take(210); // Slightly more than 200 to ensure top services
+                })
                 ->map(function ($s) use ($friendlyNames) {
                     $code = $s['service'] ?? null;
                     if ($code && isset($friendlyNames[$code])) {
                         $s['name'] = $friendlyNames[$code];
                     }
+                    // Fallback: map abbreviations (<=4 chars) to friendly names across all providers
+                    $nm = (string)($s['name'] ?? '');
+                    if ($nm === '' || preg_match('/^[A-Z]{1,4}$/', strtoupper($nm))) {
+                        if (is_string($code)) {
+                            $s['name'] = $this->getServiceNameByCode($code) ?? ($nm ?: strtoupper($code));
+                        }
+                    }
                     return $s;
                 })
-                // Convert prices to NGN for USD-based providers with markup
+                // NEW: Prioritize popular services for better user experience
+                ->map(function ($s) {
+                    $serviceCode = strtolower($s['service'] ?? '');
+                    $serviceName = strtolower($s['name'] ?? '');
+                    $fullServiceName = $serviceCode . ' ' . $serviceName; // Combine both for detection
+                    
+                    $s['is_popular'] = $this->isPopularService($serviceCode) || $this->isPopularService($serviceName);
+                    $s['priority_score'] = $this->calculateServicePriority($fullServiceName, $s);
+                    return $s;
+                })
+                // Convert prices to NGN using provider-specific FX/markup rules
                 ->map(function ($s) use ($provider) {
                     try {
                         $prov = $s['provider'] ?? $provider ?? null;
-                        $currency = $s['currency'] ?? null;
-                        // If provider handles conversion (e.g., dassy), do not convert here
-                        if ($prov && strtolower((string)$prov) === 'dassy') {
-                            return $s;
-                        }
-                        // Convert ONLY if backend did not already convert to NGN
-                        if ($prov && isset($s['cost']) && ($currency === null || strtoupper((string)$currency) !== 'NGN')) {
-                            $s['cost'] = $this->convertPriceToNgn((float)$s['cost'], (string)$prov);
+                        $originalCost = (float)($s['cost'] ?? 0);
+                        $currency = strtoupper((string)($s['currency'] ?? ''));
+                        if ($prov && isset($s['cost']) && $currency !== 'NGN') {
+                            $src = in_array($currency, ['USD','RUB']) ? $currency : 'USD';
+                            $s['cost'] = $this->convertPriceToNgn((float)$s['cost'], (string)$prov, $src);
                             $s['currency'] = 'NGN';
                         }
+                        // Safety clamp to avoid passing absurd values to frontend
+                        $limits = config('services.sms_price_limits');
+                        $maxNgn = (float)($limits['max_ngn'] ?? 3000000);
+                        $minNgn = (float)($limits['min_ngn'] ?? 1500);
+                        if (isset($s['cost'])) {
+                            if ((float)$s['cost'] > $maxNgn) { $s['cost'] = $maxNgn; }
+                            if ((float)$s['cost'] < $minNgn) { $s['cost'] = $minNgn; }
+                        }
                     } catch (\Throwable $e) {
-                        // Leave original cost on error
+                        // On error, still enforce minimum price
+                        $minPrice = 1500;
+                        if (isset($s['cost']) && (float)$s['cost'] < $minPrice) {
+                            $s['cost'] = $minPrice;
+                        }
                     }
                     return $s;
                 })
-                // Remove duplicates and sort by cost
+                // Remove duplicates and sort by priority score (popular services first)
                 ->unique('service')
-                ->sort(function ($a, $b) use ($svcWeights) {
-                    $wa = $svcWeights[$a['service']] ?? 9999;
-                    $wb = $svcWeights[$b['service']] ?? 9999;
-                    if ($wa === $wb) {
-                        return ($a['cost'] <=> $b['cost']);
+                ->sort(function ($a, $b) {
+                    // Sort by priority score (higher = more important)
+                    $aPriority = $a['priority_score'] ?? 0;
+                    $bPriority = $b['priority_score'] ?? 0;
+                    
+                    if ($aPriority !== $bPriority) {
+                        return $bPriority <=> $aPriority; // Higher priority first
                     }
-                    return $wa <=> $wb;
+                    
+                    // If same priority, sort by cost (lower cost first)
+                    $aCost = $a['cost'] ?? 999999;
+                    $bCost = $b['cost'] ?? 999999;
+                    return $aCost <=> $bCost;
                 })
                 ->values();
 
@@ -301,6 +744,11 @@ class SmsController extends Controller
                         ];
                     })->values();
                 }
+            }
+
+            // PERFORMANCE: Cache the result for expensive providers (skip for DASSY)
+            if ($provider && strtolower($provider) !== 'dassy') {
+                Cache::put($cacheKey, $services, now()->addMinutes($cacheDuration));
             }
 
             return response()->json([
@@ -322,11 +770,12 @@ class SmsController extends Controller
      */
     public function createOrder(Request $request): JsonResponse
     {
-        Log::info("=== SMS ORDER ENDPOINT CALLED ===", [
-            'timestamp' => now(),
+        $requestId = Str::uuid()->toString();
+        $startTime = microtime(true);
+        
+        $this->logSmsOperation('CREATE_ORDER_START', [
             'request_data' => $request->all(),
-            'user_agent' => $request->header('User-Agent'),
-            'ip' => $request->ip()
+            'request_id' => $requestId,
         ]);
         
         $validator = Validator::make($request->all(), [
@@ -337,6 +786,12 @@ class SmsController extends Controller
         ]);
 
         if ($validator->fails()) {
+            $this->logSmsError('CREATE_ORDER_VALIDATION_FAILED', new \Exception('Validation failed'), [
+                'validation_errors' => $validator->errors()->toArray(),
+                'request_data' => $request->all(),
+                'request_id' => $requestId,
+            ]);
+            
             return response()->json([
                 'success' => false,
                 'message' => 'Validation failed',
@@ -351,13 +806,8 @@ class SmsController extends Controller
             $provider = $request->provider;
             $mode = $request->mode ?? 'auto'; // Default to auto mode
 
-            // Check user balance
-            if ($user->balance < 150) { // Minimum cost for SMS service
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Insufficient balance. Please recharge your account.'
-                ], 400);
-            }
+            // We'll check balance after determining the actual service cost
+            // This prevents users from purchasing services beyond their balance
 
             // Provider-specific payload validation to avoid mixed/invalid combos
             if ($provider === 'textverified') {
@@ -379,6 +829,10 @@ class SmsController extends Controller
 
             // Get available SMS services based on mode
             $query = SmsService::active();
+            // Some providers (e.g., DASSY, 5SIM) don't track balance in our DB; don't block on balance for them
+            if (!($provider && in_array(strtolower($provider), ['dassy','5sim']))) {
+                $query->where('balance', '>', 0);
+            }
             
             Log::info("SMS Order Request", [
                 'user_id' => $user->id,
@@ -421,8 +875,8 @@ class SmsController extends Controller
 
             if ($smsServices->isEmpty()) {
                 $errorMessage = $mode === 'manual' 
-                    ? "No SMS services available for provider: {$provider}"
-                    : 'No SMS services available';
+                    ? "No SMS services available for provider: {$provider}. Provider may have insufficient balance."
+                    : 'No SMS services available. All providers have insufficient balance.';
                     
                 return response()->json([
                     'success' => false,
@@ -436,6 +890,7 @@ class SmsController extends Controller
             }
 
             // Try to create order with each service until successful
+            $lastError = null;
             foreach ($smsServices as $smsService) {
                 try {
                     Log::info("Attempting to create order with provider", [
@@ -447,8 +902,17 @@ class SmsController extends Controller
                     
                     $orderData = $this->smsProviderService->createOrder($smsService, $country, $service);
 
-                    // Determine charge in NGN if provider didn't supply it
+                    // Determine charge in NGN - check currency first!
                     $charge = (float)($orderData['cost'] ?? 0);
+                    $orderCurrency = strtoupper((string)($orderData['currency'] ?? 'NGN'));
+                    
+                    // If cost is provided but in USD, convert it to NGN
+                    if ($charge > 0 && $orderCurrency !== 'NGN') {
+                        $src = in_array($orderCurrency, ['USD','RUB']) ? $orderCurrency : 'USD';
+                        $charge = $this->convertPriceToNgn($charge, (string)$smsService->provider, $src);
+                    }
+                    
+                    // If charge still not determined, try to get from service list
                     if ($charge <= 0) {
                         try {
                             $svcRows = $this->smsProviderService->getServices($smsService, $country);
@@ -460,7 +924,8 @@ class SmsController extends Controller
                                         if ($rowCurrency === 'NGN') {
                                             $charge = $rowCost;
                                         } else {
-                                            $charge = $this->convertPriceToNgn($rowCost, (string)$smsService->provider);
+                                            $src = in_array($rowCurrency, ['USD','RUB']) ? $rowCurrency : 'USD';
+                                            $charge = $this->convertPriceToNgn($rowCost, (string)$smsService->provider, $src);
                                         }
                                     }
                                     break;
@@ -470,10 +935,46 @@ class SmsController extends Controller
                             // Leave $charge as 0 on failure; will be handled below
                         }
                     }
+                    
                     if ($charge <= 0) {
                         throw new \RuntimeException('Could not determine SMS price for charge');
                     }
+                    
+                    // CRITICAL: Enforce minimum price of ₦1500 BEFORE creating order
+                    $minPrice = (float)(DB::table('settings')->where('key', 'sms_min_price')->value('value') ?? 1500);
+                    if ($charge < $minPrice) {
+                        Log::warning('SMS service price below minimum - enforcing ₦1500', [
+                            'service' => $service,
+                            'provider' => $smsService->provider,
+                            'original_charge' => $charge,
+                            'enforced_price' => $minPrice,
+                            'user_id' => $user->id
+                        ]);
+                        $charge = $minPrice;
+                    }
+                    
                     $orderData['cost'] = (float) ceil($charge);
+                    
+                    // FINAL VALIDATION: Reject order if cost is below minimum (safety check)
+                    if ($orderData['cost'] < $minPrice) {
+                        Log::error('CRITICAL: Order cost below minimum - PURCHASE DECLINED', [
+                            'service' => $service,
+                            'provider' => $smsService->provider,
+                            'cost' => $orderData['cost'],
+                            'minimum_required' => $minPrice,
+                            'user_id' => $user->id
+                        ]);
+                        
+                        // Skip to next provider in auto mode, or reject in manual mode
+                        if ($mode === 'manual') {
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'This service costs ₦' . number_format($orderData['cost'], 2) . ' which is below the minimum allowed price of ₦' . number_format($minPrice, 2) . '. Please select a different service or provider.'
+                            ], 400);
+                        }
+                        // In auto mode, continue to next provider
+                        continue;
+                    }
                     
                     // Create order in database
                     $order = SmsOrder::create([
@@ -495,8 +996,82 @@ class SmsController extends Controller
                         ]
                     ]);
 
-                    // Deduct balance from user
-                    $user->updateBalance($orderData['cost'], 'subtract');
+                    // Create inbox message for SMS order
+                    $this->createSmsOrderInboxMessage($order);
+
+                    // Check if user belongs to a reseller panel
+                    $resellerPanel = null;
+                    $platformCost = $orderData['cost']; // Original cost
+                    $customerCharge = $platformCost; // What customer pays
+                    $resellerCost = $platformCost; // What reseller pays to platform
+                    
+                    if ($user->reseller_id) {
+                        $resellerPanel = \App\Models\ResellerPanel::find($user->reseller_id);
+                    }
+
+                    if ($resellerPanel && $resellerPanel->isActive()) {
+                        // Calculate costs for reseller model:
+                        // 1. Platform gives reseller 5% discount
+                        $resellerDiscount = 0.05; // 5% discount for resellers
+                        $resellerCost = $platformCost * (1 - $resellerDiscount); // Reseller pays 95% of platform price
+                        
+                        // 2. Reseller adds their margin to sell to customer
+                        // For SMS, use the panel's SMS margin
+                        $resellerMarkup = ($resellerPanel->sms_margin_percentage ?? 10) / 100;
+                        $customerCharge = $platformCost * (1 + $resellerMarkup); // Customer pays platform price + reseller margin
+                        
+                        // 3. Check if reseller's panel wallet can afford it
+                        if (!$resellerPanel->canAfford($resellerCost)) {
+                            // Rollback order
+                            $order->delete();
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'Panel wallet has insufficient balance. Panel balance: ₦' . number_format($resellerPanel->wallet_balance, 2) . '. Required: ₦' . number_format($resellerCost, 2) . '. Please contact the panel administrator to fund the wallet.'
+                            ], 400);
+                        }
+                        
+                        // 4. Deduct from RESELLER's panel wallet (discounted price)
+                        $resellerPanel->updateWalletBalance($resellerCost, 'subtract');
+                        
+                        // 5. Update panel statistics with customer charge (what was sold to customer)
+                        $resellerPanel->increment('total_transactions');
+                        $resellerPanel->increment('total_revenue', $customerCharge);
+                        
+                        // 6. Update order record with actual customer charge
+                        $order->update([
+                            'cost' => $customerCharge,
+                            'metadata' => array_merge($order->metadata ?? [], [
+                                'reseller_panel_id' => $resellerPanel->id,
+                                'platform_cost' => $platformCost,
+                                'reseller_cost' => $resellerCost,
+                                'customer_charge' => $customerCharge,
+                                'reseller_margin' => $resellerMarkup * 100,
+                                'platform_discount' => $resellerDiscount * 100
+                            ])
+                        ]);
+                        
+                        Log::info("Reseller purchase", [
+                            'panel_id' => $resellerPanel->id,
+                            'platform_cost' => $platformCost,
+                            'reseller_cost' => $resellerCost,
+                            'customer_charge' => $customerCharge,
+                            'reseller_profit' => $customerCharge - $resellerCost,
+                            'platform_profit' => $resellerCost
+                        ]);
+                    } else {
+                        // CRITICAL: Check if user has sufficient balance for the actual service cost
+                        if ($user->balance < $orderData['cost']) {
+                            // Rollback order
+                            $order->delete();
+                            return response()->json([
+                                'success' => false,
+                                'message' => 'Insufficient balance. Required: ₦' . number_format($orderData['cost'], 2) . ', Available: ₦' . number_format($user->balance, 2) . '. Please recharge your account.'
+                            ], 400);
+                        }
+                        
+                        // Deduct from USER's wallet (normal flow - not a reseller customer)
+                        $user->updateBalance($orderData['cost'], 'subtract');
+                    }
 
                     // Create transaction record
                     $user->transactions()->create([
@@ -516,8 +1091,22 @@ class SmsController extends Controller
                         ]
                     ]);
 
+                    // Deduct balance from SMS provider (in USD)
+                    $providerCost = $orderCurrency === 'USD' ? $charge / 1600 : $charge / 1600; // Convert NGN back to USD
+                    $smsService->deductBalance($providerCost);
+
                     // Update SMS service stats
                     $smsService->incrementOrders(true);
+                    
+                    // Check for low balance warning
+                    if ($smsService->hasLowBalance(5.0)) {
+                        Log::warning("Low balance alert for SMS provider", [
+                            'provider' => $smsService->provider,
+                            'provider_name' => $smsService->name,
+                            'balance' => $smsService->balance,
+                            'threshold' => 5.0
+                        ]);
+                    }
 
                     return response()->json([
                         'success' => true,
@@ -541,14 +1130,20 @@ class SmsController extends Controller
 
                 } catch (\Exception $e) {
                     // Log error and continue to next service
-                    \Log::error("Failed to create order with {$smsService->provider}: " . $e->getMessage());
+                    $lastError = $e->getMessage();
+                    \Log::error("Failed to create order with {$smsService->name}: " . $e->getMessage(), [
+                        'provider' => $smsService->provider,
+                        'country' => $country,
+                        'service' => $service,
+                        'mode' => $mode,
+                    ]);
                     continue;
                 }
             }
 
             $errorMessage = $mode === 'manual' 
-                ? "Failed to create SMS order with provider {$provider}. Please try again later."
-                : 'Failed to create SMS order. All providers are currently unavailable.';
+                ? (is_string($lastError) && $lastError !== '' ? $lastError : "Failed to create SMS order. Please try again later.")
+                : (is_string($lastError) && $lastError !== '' ? $lastError : 'Failed to create SMS order. All providers are currently unavailable.');
 
             return response()->json([
                 'success' => false,
@@ -660,6 +1255,17 @@ class SmsController extends Controller
      */
     public function getSmsCode(Request $request): JsonResponse
     {
+        // Be flexible with input: accept order_id | reference | id
+        $incomingOrderId = $request->input('order_id')
+            ?? $request->input('reference')
+            ?? $request->input('id')
+            ?? $request->query('order_id');
+
+        if ($incomingOrderId) {
+            // Normalize into order_id for validation/query
+            $request->merge(['order_id' => (string)$incomingOrderId]);
+        }
+
         $validator = Validator::make($request->all(), [
             'order_id' => 'required|string'
         ]);
@@ -674,7 +1280,7 @@ class SmsController extends Controller
 
         try {
             $user = Auth::user();
-            $orderId = $request->order_id;
+            $orderId = (string)$request->order_id;
 
             $order = SmsOrder::where('order_id', $orderId)
                 ->where('user_id', $user->id)
@@ -701,18 +1307,80 @@ class SmsController extends Controller
             }
 
             if ($order->isExpired()) {
+                // Mark expired and refund user automatically
                 $order->markAsExpired();
+                try {
+                    $user->updateBalance($order->cost, 'add');
+                    // Create refund transaction
+                    $user->transactions()->create([
+                        'type' => 'refund',
+                        'amount' => $order->cost,
+                        'balance_before' => $user->balance - $order->cost,
+                        'balance_after' => $user->balance,
+                        'description' => "Refund for expired SMS order {$order->order_id}",
+                        'reference' => 'REF_' . Str::random(15),
+                        'status' => 'success',
+                        'metadata' => [
+                            'order_id' => $order->order_id,
+                            'reason' => 'expired_no_sms',
+                        ]
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::warning('Failed to create refund transaction for expired order', [
+                        'order_id' => $order->order_id,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+
                 return response()->json([
                     'success' => false,
-                    'message' => 'Order has expired'
+                    'message' => 'Order has expired. Amount refunded to your wallet.'
                 ], 400);
             }
 
             // Get SMS code from provider
-            $smsCode = $this->smsProviderService->getSmsCode($order->smsService, $order->provider_order_id);
+            try {
+                $smsCode = $this->smsProviderService->getSmsCode($order->smsService, $order->provider_order_id);
+            } catch (\Throwable $e) {
+                $msg = strtoupper($e->getMessage());
+                // Handle provider-level cancellations/expirations with refund
+                if (str_contains($msg, 'CANCEL') || str_contains($msg, 'EXPIRED') || str_contains($msg, 'STATUS_CANCEL')) {
+                    $order->markAsCancelled();
+                    try {
+                        $user->updateBalance($order->cost, 'add');
+                        $user->transactions()->create([
+                            'type' => 'refund',
+                            'amount' => $order->cost,
+                            'balance_before' => $user->balance - $order->cost,
+                            'balance_after' => $user->balance,
+                            'description' => "Refund for cancelled/expired SMS order {$order->order_id}",
+                            'reference' => 'REF_' . Str::random(15),
+                            'status' => 'success',
+                            'metadata' => [
+                                'order_id' => $order->order_id,
+                                'reason' => 'provider_cancelled_or_expired',
+                            ]
+                        ]);
+                    } catch (\Throwable $ex) {
+                        Log::warning('Failed to refund on provider cancel', [
+                            'order_id' => $order->order_id,
+                            'error' => $ex->getMessage()
+                        ]);
+                    }
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Order cancelled/expired by provider. Amount refunded to your wallet.'
+                    ], 400);
+                }
+                throw $e; // other errors
+            }
 
             if ($smsCode) {
                 $order->markAsCompleted($smsCode);
+                
+                // Update inbox message with SMS code
+                $this->updateSmsOrderInboxMessage($order);
                 
                 return response()->json([
                     'success' => true,
@@ -776,11 +1444,53 @@ class SmsController extends Controller
                 ], 404);
             }
 
-            if ($order->isCompleted() || $order->isExpired()) {
+            // If already cancelled, return idempotent success (avoid double refunds)
+            if (strtolower((string)$order->status) === 'cancelled') {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Order already cancelled.'
+                ]);
+            }
+
+            // If order is completed, do not allow cancellation
+            if ($order->isCompleted()) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Order cannot be cancelled'
                 ], 400);
+            }
+
+            // If order is expired but no SMS code was received, refund immediately
+            if ($order->isExpired() && empty($order->sms_code)) {
+                $order->markAsCancelled();
+                try {
+                    // Refund user balance
+                    $user->updateBalance($order->cost, 'add');
+                    // Create refund transaction
+                    $user->transactions()->create([
+                        'type' => 'refund',
+                        'amount' => $order->cost,
+                        'balance_before' => $user->balance - $order->cost,
+                        'balance_after' => $user->balance,
+                        'description' => "Refund for expired SMS order {$order->order_id}",
+                        'reference' => 'REF_' . Str::random(15),
+                        'status' => 'success',
+                        'metadata' => [
+                            'order_id' => $order->order_id,
+                            'reason' => 'expired_no_sms_cancel',
+                        ]
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::warning('CancelOrder: failed to create refund transaction for expired order', [
+                        'order_id' => $order->order_id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Order expired without SMS. Balance has been refunded.'
+                ]);
             }
 
             // Cancel order with provider
@@ -1031,6 +1741,92 @@ class SmsController extends Controller
                 'success' => false,
                 'message' => 'Failed to retrieve statistics: ' . $e->getMessage()
             ], 500);
+        }
+    }
+    /**
+     * Create inbox message for SMS order
+     */
+    private function createSmsOrderInboxMessage(SmsOrder $order): void
+    {
+        try {
+            $serviceName = $order->getServiceDisplayName();
+            $phoneNumber = $order->getFormattedPhoneNumber();
+            
+            $inboxMessage = \App\Models\InboxMessage::create([
+                'user_id' => $order->user_id,
+                'type' => 'sms_order',
+                'title' => "Fadded VIP 🔆  SMS Order - {$serviceName}",
+                'message' => "Your virtual number {$phoneNumber} for {$serviceName} is ready. Waiting for SMS verification code to arrive.",
+                'reference' => $order->order_id,
+                'metadata' => [
+                    'order_id' => $order->order_id,
+                    'phone_number' => $order->phone_number,
+                    'formatted_phone' => $phoneNumber,
+                    'service' => $order->service,
+                    'service_name' => $serviceName,
+                    'country' => $order->country,
+                    'cost' => $order->cost,
+                    'status' => $order->status,
+                    'provider' => $order->smsService->provider ?? 'unknown',
+                    'provider_name' => $order->smsService->name ?? 'Unknown Provider'
+                ],
+                'is_read' => false,
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
+            
+            \Log::info('SMS order inbox message created', [
+                'order_id' => $order->order_id,
+                'inbox_message_id' => $inboxMessage->id,
+                'user_id' => $order->user_id
+            ]);
+            
+        } catch (\Exception $e) {
+            \Log::error('Failed to create SMS order inbox message', [
+                'order_id' => $order->order_id,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Update inbox message when SMS code is received
+     */
+    private function updateSmsOrderInboxMessage(SmsOrder $order): void
+    {
+        try {
+            $inboxMessage = \App\Models\InboxMessage::where('user_id', $order->user_id)
+                ->where('reference', $order->order_id)
+                ->where('type', 'sms_order')
+                ->first();
+                
+            if ($inboxMessage) {
+                $serviceName = $order->getServiceDisplayName();
+                $phoneNumber = $order->getFormattedPhoneNumber();
+                
+                $inboxMessage->update([
+                    'title' => "Fadded VIP 🔆  SMS Received - {$serviceName}",
+                    'message' => "SMS verification code received for {$phoneNumber} ({$serviceName}). Code: {$order->sms_code}",
+                    'metadata' => array_merge($inboxMessage->metadata ?? [], [
+                        'sms_code' => $order->sms_code,
+                        'status' => $order->status,
+                        'received_at' => $order->received_at?->toISOString()
+                    ]),
+                    'updated_at' => now()
+                ]);
+                
+                \Log::info('SMS order inbox message updated with code', [
+                    'order_id' => $order->order_id,
+                    'inbox_message_id' => $inboxMessage->id,
+                    'sms_code' => $order->sms_code
+                ]);
+            }
+            
+        } catch (\Exception $e) {
+            \Log::error('Failed to update SMS order inbox message', [
+                'order_id' => $order->order_id,
+                'error' => $e->getMessage()
+            ]);
         }
     }
 }

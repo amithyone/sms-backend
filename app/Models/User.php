@@ -25,7 +25,6 @@ class User extends Authenticatable
         'username',
         'password',
         'balance',
-        'wallet_balance',
         'account_number',
         'bank_name',
         'account_name',
@@ -36,6 +35,15 @@ class User extends Authenticatable
         'settings',
         'last_login_at',
         'last_login_ip',
+        'v1_user_id',
+        'google_id',
+        'avatar',
+        'auth_provider',
+        'email_verified_at',
+        'vtu_access_enabled',
+        'vtu_access_reason',
+        'vtu_access_disabled_at',
+        'vtu_access_disabled_by',
     ];
 
     /**
@@ -57,7 +65,6 @@ class User extends Authenticatable
         'email_verified_at' => 'datetime',
         'last_login_at' => 'datetime',
         'balance' => 'decimal:2',
-        'wallet_balance' => 'decimal:2',
         'settings' => 'array',
     ];
 
@@ -91,6 +98,46 @@ class User extends Authenticatable
     public function deposits(): HasMany
     {
         return $this->hasMany(Deposit::class);
+    }
+
+    /**
+     * Get user's support tickets
+     */
+    public function supportTickets(): HasMany
+    {
+        return $this->hasMany(SupportTicket::class);
+    }
+
+    /**
+     * Get user's referral relationships (as referrer)
+     */
+    public function referralRelationships(): HasMany
+    {
+        return $this->hasMany(Referral::class, 'referrer_id');
+    }
+
+    /**
+     * Get user's referral relationship (as referred user)
+     */
+    public function referredBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'referred_by');
+    }
+
+    /**
+     * Get user's referral statistics
+     */
+    public function referralStats(): HasMany
+    {
+        return $this->hasMany(ReferralStat::class, 'referrer_id');
+    }
+
+    /**
+     * Get user's referral commissions
+     */
+    public function referralCommissions(): HasMany
+    {
+        return $this->hasMany(ReferralCommission::class)->through('referralRelationships');
     }
 
     /**
@@ -135,20 +182,13 @@ class User extends Authenticatable
     }
 
     /**
-     * Update user's wallet balance
+     * Update user's wallet balance (DEPRECATED - use updateBalance instead)
+     * This method is kept for backward compatibility but redirects to updateBalance
      */
     public function updateWalletBalance(float $amount, string $type = 'add'): bool
     {
-        if ($type === 'add') {
-            $this->wallet_balance += $amount;
-        } elseif ($type === 'subtract') {
-            if ($this->wallet_balance < $amount) {
-                return false; // Insufficient wallet balance
-            }
-            $this->wallet_balance -= $amount;
-        }
-
-        return $this->save();
+        // Redirect to the correct updateBalance method
+        return $this->updateBalance($amount, $type);
     }
 
     /**
@@ -172,5 +212,16 @@ class User extends Authenticatable
             'last_login_at' => now(),
             'last_login_ip' => $ip ?? request()->ip(),
         ]);
+    }
+
+    /**
+     * Send the password reset notification.
+     *
+     * @param  string  $token
+     * @return void
+     */
+    public function sendPasswordResetNotification($token)
+    {
+        $this->notify(new \App\Notifications\ResetPasswordNotification($token));
     }
 }

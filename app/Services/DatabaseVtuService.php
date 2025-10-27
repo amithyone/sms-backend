@@ -65,6 +65,10 @@ class DatabaseVtuService
             try {
                 $result = $this->callProviderMethod($provider, 'getDataBundles', [$network]);
                 if (!empty($result)) {
+                    // Ensure consistent format - extract data if wrapped
+                    if (is_array($result) && isset($result['data']) && is_array($result['data'])) {
+                        return $result['data'];
+                    }
                     return $result;
                 }
             } catch (Exception $e) {
@@ -231,12 +235,12 @@ class DatabaseVtuService
     {
         $networkKey = strtolower($network);
         $common = [
-            ['plan' => '500MB', 'plan_name' => '500MB Daily', 'amount' => 150],
-            ['plan' => '1GB', 'plan_name' => '1GB Daily', 'amount' => 300],
-            ['plan' => '2GB', 'plan_name' => '2GB 2-Days', 'amount' => 500],
-            ['plan' => '3GB', 'plan_name' => '3GB Weekly', 'amount' => 900],
-            ['plan' => '5GB', 'plan_name' => '5GB Weekly', 'amount' => 1500],
-            ['plan' => '10GB', 'plan_name' => '10GB Monthly', 'amount' => 3000],
+            ['plan' => '500MB', 'plan_name' => '500MB Daily', 'amount' => 1500],
+            ['plan' => '1GB', 'plan_name' => '1GB Daily', 'amount' => 3000],
+            ['plan' => '2GB', 'plan_name' => '2GB 2-Days', 'amount' => 5000],
+            ['plan' => '3GB', 'plan_name' => '3GB Weekly', 'amount' => 9000],
+            ['plan' => '5GB', 'plan_name' => '5GB Weekly', 'amount' => 15000],
+            ['plan' => '10GB', 'plan_name' => '10GB Monthly', 'amount' => 30000],
         ];
 
         return array_map(function ($b) use ($networkKey) {

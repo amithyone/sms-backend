@@ -33,6 +33,10 @@ class Kernel extends HttpKernel
 
         'api' => [
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            // Request/Response logging middleware (after authentication)
+            \App\Http\Middleware\RequestResponseLogger::class,
+            // Log all VTU/SMS API requests & responses
+            \App\Http\Middleware\LogVtuSmsRequests::class,
         ],
     ];
 
@@ -46,5 +50,7 @@ class Kernel extends HttpKernel
         'auth.basic' => \Illuminate\Auth\Middleware\AuthenticateWithBasicAuth::class,
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
         'admin' => \App\Http\Middleware\AdminMiddleware::class,
+        'log.vtu_sms' => \App\Http\Middleware\LogVtuSmsRequests::class,
+        'api.key' => \App\Http\Middleware\ApiKeyAuth::class,
     ];
 }

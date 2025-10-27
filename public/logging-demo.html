@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FadSMS - Error Logging Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .demo-section {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .demo-section h3 {
+            margin-top: 0;
+            color: #555;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .error-button {
+            background-color: #dc3545;
+        }
+        .error-button:hover {
+            background-color: #c82333;
+        }
+        .success-button {
+            background-color: #28a745;
+        }
+        .success-button:hover {
+            background-color: #218838;
+        }
+        .log-output {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 FadSMS Error Logging System Demo</h1>
+        
+        <div class="status info">
+            <strong>📊 System Status:</strong> Error logging system is active and monitoring all frontend activities.
+        </div>
+
+        <div class="demo-section">
+            <h3>🧪 Test JavaScript Errors</h3>
+            <p>Click these buttons to test different types of errors:</p>
+            <button class="error-button" onclick="testJavaScriptError()">Trigger JavaScript Error</button>
+            <button class="error-button" onclick="testPromiseRejection()">Trigger Promise Rejection</button>
+            <button class="error-button" onclick="testNetworkError()">Trigger Network Error</button>
+        </div>
+
+        <div class="demo-section">
+            <h3>📡 Test API Calls</h3>
+            <p>Test API calls to see request/response logging:</p>
+            <button class="success-button" onclick="testSuccessfulApiCall()">Test Successful API Call</button>
+            <button class="error-button" onclick="testFailedApiCall()">Test Failed API Call</button>
+            <button class="success-button" onclick="testSmsApiCall()">Test SMS API Call</button>
+        </div>
+
+        <div class="demo-section">
+            <h3>⚡ Test Performance Monitoring</h3>
+            <p>Test performance monitoring:</p>
+            <button onclick="testSlowOperation()">Test Slow Operation</button>
+            <button onclick="testPageLoadPerformance()">Test Page Load Performance</button>
+        </div>
+
+        <div class="demo-section">
+            <h3>📝 Log Output</h3>
+            <div id="logOutput" class="log-output">
+                <div class="status info">Error logger initialized. All errors and API calls will be logged automatically.</div>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>🔧 Manual Error Logging</h3>
+            <p>Manually log custom errors:</p>
+            <button onclick="logCustomError()">Log Custom Error</button>
+            <button onclick="logCustomPerformance()">Log Performance Issue</button>
+        </div>
+    </div>
+
+    <!-- Include the Error Logger -->
+    <script src="/js/error-logger.js"></script>
+    
+    <script>
+        // Demo functions
+        function testJavaScriptError() {
+            addLog('Triggering JavaScript error...');
+            // This will cause a JavaScript error
+            undefinedFunction();
+        }
+
+        function testPromiseRejection() {
+            addLog('Triggering promise rejection...');
+            // This will cause an unhandled promise rejection
+            Promise.reject(new Error('Demo promise rejection error'));
+        }
+
+        function testNetworkError() {
+            addLog('Testing network error...');
+            // This will cause a network error
+            fetch('/api/nonexistent-endpoint')
+                .then(response => response.json())
+                .catch(error => {
+                    addLog('Network error caught: ' + error.message);
+                });
+        }
+
+        function testSuccessfulApiCall() {
+            addLog('Testing successful API call...');
+            fetch('/api/test')
+                .then(response => response.json())
+                .then(data => {
+                    addLog('API call successful: ' + JSON.stringify(data));
+                })
+                .catch(error => {
+                    addLog('API call failed: ' + error.message);
+                });
+        }
+
+        function testFailedApiCall() {
+            addLog('Testing failed API call...');
+            fetch('/api/errors/logFrontendError', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    error: 'Test error from demo',
+                    component: 'DemoComponent',
+                    action: 'testFailedApiCall'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                addLog('Error logged successfully: ' + JSON.stringify(data));
+            })
+            .catch(error => {
+                addLog('Failed to log error: ' + error.message);
+            });
+        }
+
+        function testSmsApiCall() {
+            addLog('Testing SMS API call...');
+            fetch('/api/sms/countries')
+                .then(response => response.json())
+                .then(data => {
+                    addLog('SMS API call successful: ' + (data.success ? 'Success' : 'Failed'));
+                })
+                .catch(error => {
+                    addLog('SMS API call failed: ' + error.message);
+                });
+        }
+
+        function testSlowOperation() {
+            addLog('Testing slow operation...');
+            const startTime = performance.now();
+            
+            // Simulate slow operation
+            setTimeout(() => {
+                const duration = performance.now() - startTime;
+                addLog(`Slow operation completed in ${duration.toFixed(2)}ms`);
+                
+                // Log performance issue if it took too long
+                if (duration > 1000) {
+                    window.errorLogger.logPerformance({
+                        metric: 'slow_operation',
+                        value: duration,
+                        threshold: 1000,
+                        component: 'DemoComponent',
+                        action: 'testSlowOperation'
+                    });
+                }
+            }, 1500);
+        }
+
+        function testPageLoadPerformance() {
+            addLog('Testing page load performance...');
+            
+            // Get performance data
+            const perfData = performance.getEntriesByType('navigation')[0];
+            if (perfData) {
+                const loadTime = perfData.loadEventEnd - perfData.loadEventStart;
+                addLog(`Page load time: ${loadTime.toFixed(2)}ms`);
+                
+                window.errorLogger.logPerformance({
+                    metric: 'page_load_time',
+                    value: loadTime,
+                    threshold: 3000,
+                    component: 'page',
+                    action: 'load'
+                });
+            }
+        }
+
+        function logCustomError() {
+            addLog('Logging custom error...');
+            window.errorLogger.logError({
+                type: 'custom_error',
+                message: 'This is a custom error for testing',
+                component: 'DemoComponent',
+                action: 'logCustomError',
+                metadata: {
+                    test: true,
+                    timestamp: new Date().toISOString()
+                }
+            });
+        }
+
+        function logCustomPerformance() {
+            addLog('Logging custom performance issue...');
+            window.errorLogger.logPerformance({
+                metric: 'custom_metric',
+                value: 5000,
+                threshold: 2000,
+                component: 'DemoComponent',
+                action: 'logCustomPerformance',
+                metadata: {
+                    test: true
+                }
+            });
+        }
+
+        function addLog(message) {
+            const logOutput = document.getElementById('logOutput');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.innerHTML = `<strong>[${timestamp}]</strong> ${message}`;
+            logOutput.appendChild(logEntry);
+            logOutput.scrollTop = logOutput.scrollHeight;
+        }
+
+        // Initialize demo
+        document.addEventListener('DOMContentLoaded', function() {
+            addLog('Demo page loaded successfully');
+            addLog('Error logger is active and monitoring');
+            
+            // Test that error logger is working
+            if (window.errorLogger) {
+                addLog('✅ Error logger initialized successfully');
+            } else {
+                addLog('❌ Error logger failed to initialize');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -22,18 +22,24 @@ class FiveSimProvider implements ProviderInterface
     {
         $config = $smsService->getApiConfig();
         $resp = $this->httpClient
-            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
             ->get($config['api_url'] . '/v1/guest/countries');
 
         if ($resp->successful()) {
             $data = $resp->json();
             if (is_array($data)) {
-                return collect($data)->map(function ($country) {
-                    return [
-                        'code' => $country['country'] ?? ($country['code'] ?? null),
-                        'name' => $country['title'] ?? ($country['name'] ?? ''),
-                    ];
-                })->filter(fn($c) => $c['code'] && $c['name'])->values()->toArray();
+                $countries = [];
+                // New API format: { "countryname": { "iso": {...}, "text_en": "Name", ... }, ... }
+                foreach ($data as $countrySlug => $countryInfo) {
+                    if (is_array($countryInfo)) {
+                        $name = $countryInfo['text_en'] ?? ucfirst($countrySlug);
+                        $countries[] = [
+                            'code' => $countrySlug,
+                            'name' => $name,
+                        ];
+                    }
+                }
+                return $countries;
             }
         }
 
@@ -91,14 +97,17 @@ class FiveSimProvider implements ProviderInterface
         // Validate slug against official 5SIM countries; if invalid, avoid bad requests
         if ($countrySlug) {
             $countriesResp = $this->httpClient
-                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
                 ->get($config['api_url'] . '/v1/guest/countries');
             if ($countriesResp->successful()) {
                 $list = $countriesResp->json();
                 $slugs = [];
                 if (is_array($list)) {
-                    foreach ($list as $row) {
-                        if (is_array($row) && !empty($row['country'])) { $slugs[strtolower($row['country'])] = true; }
+                    // New API format: { "countryname": {...}, ... }
+                    foreach ($list as $countryKey => $countryInfo) {
+                        if (is_array($countryInfo)) {
+                            $slugs[strtolower($countryKey)] = true;
+                        }
                     }
                 }
                 if (empty($slugs[$countrySlug])) {
@@ -107,11 +116,13 @@ class FiveSimProvider implements ProviderInterface
             }
         }
 
+        // Use prices endpoint to get ALL services (including out of stock)
+        // This is better than products endpoint which hides services with 0 count
         $response = null;
         if ($countrySlug) {
             $response = $this->httpClient
-                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
-                ->get($config['api_url'] . "/v1/guest/products/{$countrySlug}/any");
+                ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
+                ->get($config['api_url'] . "/v1/guest/prices?country={$countrySlug}");
         } else {
             // No valid slug for 5SIM: return empty to avoid failed number requests
             return [];
@@ -120,36 +131,53 @@ class FiveSimProvider implements ProviderInterface
         if ($response->successful()) {
             $data = $response->json();
             if (is_array($data) && !empty($data)) {
-                // Handle both list and associative map shapes
+                // Prices endpoint format: { "country": { "service": { "operator": { "cost": X, "count": Y } } } }
                 $out = [];
-                $isAssoc = array_keys($data) !== range(0, count($data) - 1);
-                if ($isAssoc) {
-                    foreach ($data as $product => $info) {
-                        if (!is_array($info)) continue;
-                        $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
-                        $usdCost = (isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0)) * max($usdPerRub, 0.00001);
-                        $out[] = [
-                            'name' => $info['name'] ?? ucfirst((string)$product),
-                            'service' => $info['service'] ?? (string)$product,
-                            'cost' => $usdCost,
-                            'currency' => 'USD',
-                            'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
-                        ];
-                    }
-                } else {
-                    foreach ($data as $info) {
-                        if (!is_array($info)) continue;
-                        $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
-                        $usdCost = (isset($info['Price']) ? (float)$info['Price'] : (isset($info['price']) ? (float)$info['price'] : 0)) * max($usdPerRub, 0.00001);
-                        $out[] = [
-                            'name' => $info['name'] ?? ($info['service'] ?? 'Service'),
-                            'service' => $info['service'] ?? ($info['code'] ?? 'unknown'),
-                            'cost' => $usdCost,
-                            'currency' => 'USD',
-                            'count' => isset($info['Qty']) ? (int)$info['Qty'] : (isset($info['count']) ? (int)$info['count'] : 0),
-                        ];
+                $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
+                
+                // Data is nested by country, extract the country data
+                $countryData = null;
+                foreach ($data as $key => $value) {
+                    if (is_array($value) && strtolower($key) === strtolower($countrySlug)) {
+                        $countryData = $value;
+                        break;
                     }
                 }
+                
+                if ($countryData) {
+                    // Now iterate through services
+                    foreach ($countryData as $product => $operators) {
+                        if (!is_array($operators)) continue;
+                        
+                        // Aggregate across all operators for this service
+                        $minPriceRub = null;
+                        $totalQty = 0;
+                        
+                        foreach ($operators as $operator => $info) {
+                            if (!is_array($info)) continue;
+                            
+                            $priceRub = isset($info['cost']) ? (float)$info['cost'] : 0;
+                            $qty = isset($info['count']) ? (int)$info['count'] : 0;
+                            
+                            if ($priceRub > 0) {
+                                $minPriceRub = $minPriceRub === null ? $priceRub : min($minPriceRub, $priceRub);
+                            }
+                            $totalQty += $qty;
+                        }
+                        
+                        if ($minPriceRub !== null && $minPriceRub > 0) {
+                            $usdCost = $minPriceRub * max($usdPerRub, 0.00001);
+                            $out[] = [
+                                'name' => ucfirst((string)$product),
+                                'service' => (string)$product,
+                                'cost' => $usdCost,
+                                'currency' => 'USD',
+                                'count' => $totalQty,
+                            ];
+                        }
+                    }
+                }
+                
                 if (!empty($out)) {
                     return $out;
                 }
@@ -238,14 +266,17 @@ class FiveSimProvider implements ProviderInterface
         $countrySlug = null;
         if (!is_numeric($country)) { $countrySlug = strtolower((string)$country); }
         $countriesResp = $this->httpClient
-            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
             ->get($apiBase . '/v1/guest/countries');
         if ($countriesResp->successful()) {
             $valid = [];
             $list = $countriesResp->json();
             if (is_array($list)) {
-                foreach ($list as $row) {
-                    if (is_array($row) && !empty($row['country'])) { $valid[strtolower($row['country'])] = true; }
+                // New API format: { "countryname": {...}, ... }
+                foreach ($list as $countryKey => $countryInfo) {
+                    if (is_array($countryInfo)) {
+                        $valid[strtolower($countryKey)] = true;
+                    }
                 }
             }
             if (!$countrySlug || empty($valid[$countrySlug])) {
@@ -255,11 +286,11 @@ class FiveSimProvider implements ProviderInterface
         }
 
         $product = $this->mapServiceCodeToProduct($service);
-        $buyUrl = $apiBase . '/v1/user/buy/activation?country=' . urlencode($countrySlug) . '&operator=any&product=' . urlencode($product);
+        $buyUrl = $apiBase . '/v1/user/buy/activation/' . urlencode($countrySlug) . '/any/' . urlencode($product);
         $resp = $this->httpClient
             ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
-            ->post($buyUrl);
-        Log::info('5SIM buy activation HTTP', [ 'url' => preg_replace('/(api_key|Authorization)=[^&]*/i', '$1=***', $buyUrl), 'status' => $resp->status(), 'body_sample' => substr($resp->body(), 0, 500) ]);
+            ->get($buyUrl);
+        Log::info('5SIM buy activation HTTP', [ 'url' => 'GET /v1/user/buy/activation/***', 'status' => $resp->status(), 'body_sample' => substr($resp->body(), 0, 500) ]);
 
         if ($resp->successful()) {
             $data = $resp->json();
@@ -280,58 +311,83 @@ class FiveSimProvider implements ProviderInterface
     public function getSmsCode(SmsService $smsService, string $orderId): ?string
     {
         $config = $smsService->getApiConfig();
-        $handlerBase = (string)($config['api_url'] ?? 'http://api1.5sim.net/stubs/handler_api.php');
-        if (stripos($handlerBase, 'handler_api.php') === false) {
-            $handlerBase = rtrim($handlerBase, '/') . '/stubs/handler_api.php';
-        }
-        $url = $handlerBase
-            . '?api_key=' . urlencode((string)($config['api_key'] ?? ''))
-            . '&action=getStatus'
-            . '&id=' . urlencode($orderId);
+        $apiBase = rtrim((string)($config['api_url'] ?? 'https://5sim.net'), '/');
+        
+        // Use new v1 API to check order status
+        $url = $apiBase . '/v1/user/check/' . urlencode($orderId);
+        $resp = $this->httpClient
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
+            ->get($url);
 
-        $resp = $this->httpClient->get($url);
-        $body = trim($resp->body());
         if ($resp->successful()) {
-            if (stripos($body, 'STATUS_OK') === 0) {
-                $parts = explode(':', $body, 2);
-                return isset($parts[1]) ? trim($parts[1]) : null;
-            }
-            if (stripos($body, 'STATUS_WAIT') === 0) {
-                return null;
+            $data = $resp->json();
+            
+            // Check if SMS has been received
+            if (is_array($data) && isset($data['sms'])) {
+                $sms = $data['sms'];
+                
+                // Handle array of SMS messages
+                if (is_array($sms) && !empty($sms)) {
+                    // Get the most recent SMS code
+                    $lastSms = end($sms);
+                    if (is_array($lastSms) && isset($lastSms['code'])) {
+                        return (string)$lastSms['code'];
+                    }
+                    // Fallback: extract from text
+                    if (is_array($lastSms) && isset($lastSms['text'])) {
+                        preg_match('/\b\d{4,8}\b/', $lastSms['text'], $matches);
+                        return $matches[0] ?? null;
+                    }
+                }
+                
+                // Status is still waiting
+                if ($data['status'] === 'PENDING' || $data['status'] === 'RECEIVED') {
+                    return null;
+                }
             }
         }
+        
         return null;
     }
 
     public function cancelOrder(SmsService $smsService, string $orderId): bool
     {
         $config = $smsService->getApiConfig();
-        $handlerBase = (string)($config['api_url'] ?? 'http://api1.5sim.net/stubs/handler_api.php');
-        if (stripos($handlerBase, 'handler_api.php') === false) {
-            $handlerBase = rtrim($handlerBase, '/') . '/stubs/handler_api.php';
-        }
-        $url = $handlerBase
-            . '?api_key=' . urlencode((string)($config['api_key'] ?? ''))
-            . '&action=setStatus'
-            . '&id=' . urlencode($orderId)
-            . '&status=8';
+        $apiBase = rtrim((string)($config['api_url'] ?? 'https://5sim.net'), '/');
+        
+        // Use new v1 API to cancel order
+        $url = $apiBase . '/v1/user/cancel/' . urlencode($orderId);
+        $resp = $this->httpClient
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
+            ->get($url);
 
-        $resp = $this->httpClient->get($url);
-        $body = trim($resp->body());
-        return $resp->successful() && (
-            stripos($body, 'ACCESS_CANCEL') === 0 || stripos($body, 'STATUS_CANCEL') === 0 || stripos($body, 'ACCESS') === 0
-        );
+        if ($resp->successful()) {
+            $data = $resp->json();
+            // API returns the order with updated status
+            if (is_array($data) && isset($data['status'])) {
+                return in_array($data['status'], ['CANCELED', 'CANCELLED', 'CANCEL']);
+            }
+        }
+        
+        return false;
     }
 
     public function getBalance(SmsService $smsService): float
     {
         $config = $smsService->getApiConfig();
         $response = $this->httpClient
-            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key']])
+            ->withHeaders(['Authorization' => 'Bearer ' . $config['api_key'], 'Accept' => 'application/json'])
             ->get($config['api_url'] . '/v1/user/profile');
         if ($response->successful()) {
             $data = $response->json();
-            return $data['balance'] ?? 0.0;
+            $balanceRub = $data['balance'] ?? 0.0;
+            
+            // Convert Russian Rubles to USD for dashboard display
+            // 5sim balance is in RUB, we need to convert to USD
+            $usdPerRub = (float) config('services.sms_fx.usd_per_rub', 0.011);
+            $balanceUsd = $balanceRub * max($usdPerRub, 0.00001);
+            
+            return $balanceUsd;
         }
         return 0.0;
     }

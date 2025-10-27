@@ -6,6 +6,7 @@ use App\Models\SmsService;
 use App\Services\SimpleHttpClient;
 use App\Services\Sms\ProviderInterface;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 use Exception;
 
 /**
@@ -100,7 +101,30 @@ class SmsPoolProvider implements ProviderInterface
                 'name' => $serviceName !== '' ? $serviceName : $serviceId,
                 'cost' => $price,
                 'count' => 0,
+                'currency' => 'USD', // Mark as USD so SmsController converts it properly
             ];
+        }
+
+        // Map numeric service IDs to friendly names when available in catalog
+        try {
+            $map = DB::table('sms_service_codes')
+                ->where('provider', 'smspool')
+                ->pluck('name', 'code');
+            if ($map && $map->isNotEmpty()) {
+                foreach ($out as &$svc) {
+                    $code = (string)($svc['service'] ?? '');
+                    $name = (string)($svc['name'] ?? '');
+                    $isNumericName = $name !== '' && preg_match('/^\d+$/', $name);
+                    if ($code !== '' && isset($map[$code])) {
+                        $svc['name'] = (string)$map[$code];
+                    } elseif ($isNumericName && isset($map[$name])) {
+                        $svc['name'] = (string)$map[$name];
+                    }
+                }
+                unset($svc);
+            }
+        } catch (\Throwable $e) {
+            Log::debug('Smspool name map lookup failed', ['error' => $e->getMessage()]);
         }
         return $out;
     }
@@ -120,7 +144,26 @@ class SmsPoolProvider implements ProviderInterface
         ];
         $resp = $client->post($base . '/purchase/sms', $payload);
         if (!$resp->successful()) {
-            throw new Exception('SMSPool create order failed: HTTP ' . $resp->status());
+            // Try to include provider error message for better UX (e.g., whitelist-only)
+            $status = (int) $resp->status();
+            $body = (string) $resp->body();
+            $msg = 'HTTP ' . $status;
+            try {
+                $err = $resp->json();
+                if (is_array($err) && isset($err['message']) && is_string($err['message']) && $err['message'] !== '') {
+                    $msg = trim($err['message']) . ' (HTTP ' . $status . ')';
+                }
+            } catch (\Throwable $e) {
+                if ($body !== '') {
+                    $snippet = substr($body, 0, 200);
+                    $msg = $snippet . ' (HTTP ' . $status . ')';
+                }
+            }
+            // Bubble special whitelist wording if present to trigger frontend fallback
+            if (stripos($msg, 'whitelist') !== false) {
+                throw new Exception('SMSpool: whitelist-only restriction. ' . $msg);
+            }
+            throw new Exception('SMSPool create order failed: ' . $msg);
         }
         $data = $resp->json();
         if (!is_array($data) || empty($data['success'])) {
@@ -131,6 +174,7 @@ class SmsPoolProvider implements ProviderInterface
             'order_id' => (string)($data['order_id'] ?? $data['orderid'] ?? ''),
             'phone_number' => (string)($data['number'] ?? ''),
             'cost' => (float)($data['cost'] ?? 0),
+            'currency' => 'USD', // Mark cost as USD for proper conversion
             'status' => 'active',
             'expires_at' => now()->addMinutes(20),
         ];

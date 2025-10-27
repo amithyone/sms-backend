@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response;
 use App\Models\SmsOrder;
+use App\Models\InboxMessage;
 
 class WebhookController extends Controller
 {
@@ -58,8 +59,29 @@ class WebhookController extends Controller
 
             if ($order && $code) {
                 $order->markAsCompleted($code);
-                return response()->json(['success' => true]);
             }
+
+            // Persist notification to inbox_messages for the user, if resolvable
+            $userId = $order ? $order->user_id : null;
+            try {
+                InboxMessage::create([
+                    'user_id' => $userId,
+                    'type' => 'notification',
+                    'title' => 'SMS Code Received',
+                    'message' => $code ? ("Your verification code is: $code") : ('SMS message received'),
+                    'reference' => $reservationId ?: ($data['messageId'] ?? null),
+                    'metadata' => [
+                        'provider' => 'textverified',
+                        'to' => $to,
+                        'raw' => $data,
+                    ],
+                    'is_read' => false,
+                ]);
+            } catch (\Throwable $e) {
+                Log::error('Failed to persist inbox message for webhook', [ 'error' => $e->getMessage() ]);
+            }
+
+            return response()->json(['success' => true]);
         }
 
         return response()->json(['success' => true]);

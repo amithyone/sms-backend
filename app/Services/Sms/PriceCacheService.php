@@ -16,7 +16,7 @@ class PriceCacheService
      */
     public function upsertPrices(string $provider, string $countryCode, array $services): void
     {
-        $providerCurrency = $this->inferProviderCurrency($provider);
+        $providerCurrencyDefault = $this->inferProviderCurrency($provider);
         $now = now();
 
         foreach ($services as $row) {
@@ -29,6 +29,9 @@ class PriceCacheService
             $count = (int)($row['count'] ?? 0);
 
             try {
+                // Prefer currency from row if provided; otherwise infer
+                $rowCurrency = strtoupper((string)($row['currency'] ?? ''));
+                $providerCurrency = $rowCurrency !== '' ? $rowCurrency : $providerCurrencyDefault;
                 DB::table('sms_service_country_prices')->updateOrInsert(
                     [
                         'provider' => $provider,
@@ -45,6 +48,23 @@ class PriceCacheService
                         'created_at' => $now,
                     ]
                 );
+
+                // Also upsert friendly name mapping so UI can show names for numeric codes (e.g., smspool)
+                if ($serviceName !== '') {
+                    try {
+                        DB::table('sms_service_codes')->updateOrInsert(
+                            [ 'provider' => $provider, 'code' => $serviceCode ],
+                            [ 'name' => $serviceName, 'updated_at' => $now, 'created_at' => $now ]
+                        );
+                    } catch (\Throwable $e) {
+                        Log::warning('PriceCache upsert code-name failed', [
+                            'provider' => $provider,
+                            'service' => $serviceCode,
+                            'name' => $serviceName,
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
+                }
             } catch (\Throwable $e) {
                 Log::error('PriceCache upsert failed', [
                     'provider' => $provider,
@@ -58,8 +78,15 @@ class PriceCacheService
 
     private function inferProviderCurrency(string $provider): string
     {
-        // Default USD until FX module is wired
-        return 'USD';
+        // Provider-native currency hints for catalog rows
+        switch (strtolower($provider)) {
+            case 'dassy':
+                return 'RUB';
+            case 'textverified':
+                return 'USD';
+            default:
+                return 'USD';
+        }
     }
 }
 

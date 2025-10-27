@@ -26,36 +26,33 @@ class TextVerifiedProvider implements ProviderInterface
     public function getServices(SmsService $smsService, string $country): array
     {
         $config = $smsService->getApiConfig();
-        $query = 'numberType=mobile&reservationType=verification';
-        $url = 'https://www.textverified.com/api/pub/v2/services?' . $query;
+        
+        $baseUrl = 'https://www.textverified.com/api/pub/v2/services';
+        // Request larger page size to minimize pagination hops
+        $query = 'numberType=mobile&reservationType=verification&page[size]=100';
+        $firstUrl = $baseUrl . '?' . $query;
 
-        // Attempt with Bearer first
+        // Try bearer-auth paginated fetch first; fall back to API-key headers
         try {
             $bearer = $this->getBearer($config);
-            $resp = $this->httpClient->get($url, [ 'headers' => [ 'Authorization' => 'Bearer ' . $bearer, 'Accept' => 'application/json' ] ]);
-            Log::info('TextVerified getServices (bearer) HTTP', [ 'status' => $resp->status(), 'body_sample' => substr($resp->body(), 0, 300) ]);
-            if ($resp->successful()) {
-                $parsed = json_decode($resp->body(), true);
-                $services = $this->parseServicesPayload($parsed);
-                if (!empty($services)) return $services;
-            }
+            $headers = [ 'Authorization' => 'Bearer ' . $bearer, 'Accept' => 'application/json' ];
+            $all = $this->fetchAllTextVerifiedPages($firstUrl, $headers);
+            if (!empty($all)) return $all;
         } catch (\Throwable $e) {
-            Log::warning('TextVerified bearer fetch failed, will fallback to API headers', [ 'error' => $e->getMessage() ]);
+            Log::warning('TextVerified bearer pagination failed, trying API key headers', [ 'error' => $e->getMessage() ]);
         }
 
-        // Fallback: API key headers without bearer
-        $resp2 = $this->httpClient->get($url, [ 'headers' => [
+        $headers2 = [
             'X-API-KEY' => $config['api_key'] ?? '',
             'X-API-USERNAME' => $config['settings']['username'] ?? '',
             'Accept' => 'application/json',
-        ]]);
-        Log::info('TextVerified getServices (api headers) HTTP', [ 'status' => $resp2->status(), 'body_sample' => substr($resp2->body(), 0, 300) ]);
-        if (!$resp2->successful()) {
-            Log::error('TextVerified getServices HTTP (fallback)', [ 'url' => $url, 'status' => $resp2->status(), 'body_sample' => substr($resp2->body(), 0, 300) ]);
+        ];
+        try {
+            return $this->fetchAllTextVerifiedPages($firstUrl, $headers2);
+        } catch (\Throwable $e) {
+            Log::error('TextVerified getServices failed (api headers)', [ 'error' => $e->getMessage() ]);
             return [];
         }
-        $parsed2 = json_decode($resp2->body(), true);
-        return $this->parseServicesPayload($parsed2);
     }
 
     public function createOrder(SmsService $smsService, string $country, string $service): array
@@ -158,6 +155,131 @@ class TextVerifiedProvider implements ProviderInterface
             throw new Exception('Invalid response from TextVerified verification details API');
         }
         return $data['data'];
+    }
+
+    /**
+     * Fetch all pages from TextVerified services endpoint following JSON:API links.next
+     */
+    private function fetchAllTextVerifiedPages(string $firstUrl, array $headers): array
+    {
+        $collected = [];
+        $visited = 0;
+        $maxPages = 15;
+        $nextUrl = $firstUrl;
+
+        while ($nextUrl && $visited < $maxPages) {
+            try {
+                $resp = $this->httpClient->get($nextUrl, [ 'headers' => $headers ]);
+            } catch (\Throwable $e) {
+                Log::warning('TextVerified page request threw', [ 'url' => $nextUrl, 'error' => $e->getMessage() ]);
+                break;
+            }
+            Log::info('TextVerified getServices page', [ 'url' => $nextUrl, 'status' => $resp->status() ]);
+            if (!$resp->successful()) {
+                break;
+            }
+            $payload = json_decode($resp->body(), true);
+            $rows = $this->parseServicesPayload($payload);
+            if (!empty($rows)) {
+                $collected = array_merge($collected, $rows);
+            }
+            $visited++;
+
+            $next = null;
+            if (is_array($payload)) {
+                if (isset($payload['links']) && is_array($payload['links']) && !empty($payload['links']['next'])) {
+                    $next = $payload['links']['next'];
+                } elseif (isset($payload['meta']) && isset($payload['meta']['page']) && isset($payload['meta']['pages'])) {
+                    $page = (int)$payload['meta']['page'];
+                    $pages = (int)$payload['meta']['pages'];
+                    if ($pages > $page) {
+                        // Preserve existing query and just update page[number]
+                        $parsed = parse_url($firstUrl);
+                        $base = ($parsed['scheme'] ?? 'https') . '://' . ($parsed['host'] ?? 'www.textverified.com') . ($parsed['path'] ?? '/api/pub/v2/services');
+                        $q = [];
+                        if (!empty($parsed['query'])) { parse_str($parsed['query'], $q); }
+                        $q['page[number]'] = $page + 1;
+                        $next = $base . '?' . http_build_query($q);
+                    }
+                }
+            }
+            $nextUrl = $next;
+        }
+
+        // De-duplicate by service name
+        $out = [];
+        $seen = [];
+        foreach ($collected as $row) {
+            $key = is_array($row) ? ($row['service'] ?? $row['name'] ?? null) : null;
+            if ($key && !isset($seen[$key])) {
+                $seen[$key] = true;
+                $out[] = $row;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Get services via Python client bridge
+     */
+    private function getServicesViaPythonClient(array $config): array
+    {
+        $apiKey = $config['api_key'] ?? '';
+        $username = $config['settings']['username'] ?? '';
+        
+        // Create temporary Python script
+        $scriptPath = sys_get_temp_dir() . '/textverified_services_' . uniqid() . '.py';
+        $scriptContent = "#!/usr/bin/env python3
+from textverified import TextVerified
+from textverified import NumberType, ReservationType
+import json
+
+client = TextVerified(
+    api_key=\"{$apiKey}\",
+    api_username=\"{$username}\",
+)
+
+try:
+    services = client.services.list(
+        number_type=NumberType.MOBILE,
+        reservation_type=ReservationType.VERIFICATION
+    )
+    
+    # Return ALL services as JSON (no artificial limit)
+    result = []
+    for service in services:
+        result.append({
+            'service': service.service_name,
+            'name': service.service_name,
+            'cost': 0.0,  # Cost not available in this endpoint
+            'count': 1,
+            'provider': 'textverified',
+            'provider_name': 'TextVerified'
+        })
+    
+    print(json.dumps(result))
+except Exception as e:
+    print(json.dumps([]))
+";
+        
+        file_put_contents($scriptPath, $scriptContent);
+        chmod($scriptPath, 0755);
+        
+        try {
+            $output = shell_exec("python3 $scriptPath 2>&1");
+            $services = json_decode($output, true);
+            
+            // Clean up
+            unlink($scriptPath);
+            
+            return is_array($services) ? $services : [];
+        } catch (\Throwable $e) {
+            // Clean up on error
+            if (file_exists($scriptPath)) {
+                unlink($scriptPath);
+            }
+            throw $e;
+        }
     }
 
     /**

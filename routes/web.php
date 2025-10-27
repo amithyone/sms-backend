@@ -4,6 +4,8 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\WebhookController;
+use App\Http\Controllers\DocumentationController;
+use App\Http\Controllers\SocialAuthController;
 
 /*
 |--------------------------------------------------------------------------
@@ -31,6 +33,28 @@ Route::get('/', function () {
 
 /*
 |--------------------------------------------------------------------------
+| Google OAuth Routes (Web - without /api prefix)
+|--------------------------------------------------------------------------
+*/
+// Note: Google OAuth routes are handled in api.php to avoid conflicts
+
+/*
+|--------------------------------------------------------------------------
+| Documentation Routes
+|--------------------------------------------------------------------------
+|
+| Public documentation pages accessible without authentication
+|
+*/
+
+Route::get('/docs', [DocumentationController::class, 'index']);
+Route::get('/API_DOCUMENTATION.md', [DocumentationController::class, 'apiDocumentation']);
+Route::get('/HELP_RESOURCES.md', [DocumentationController::class, 'helpResources']);
+Route::get('/TERMS_OF_USE.md', [DocumentationController::class, 'termsOfUse']);
+Route::get('/PRIVACY_POLICY.md', [DocumentationController::class, 'privacyPolicy']);
+
+/*
+|--------------------------------------------------------------------------
 | Admin Routes
 |--------------------------------------------------------------------------
 |
@@ -48,6 +72,13 @@ Route::prefix('admin')->group(function () {
     // Dashboard view (unprotected view; data fetched via API)
     Route::get('/', [AdminController::class, 'dashboard']);
     Route::get('/dashboard', [AdminController::class, 'dashboard']);
+    Route::get('/advertisements', [AdminController::class, 'advertisements']);
+    Route::get('/broadcasts', [AdminController::class, 'broadcasts']);
+    Route::get('/crypto-sales', [AdminController::class, 'cryptoSales']);
+    Route::get('/reseller-panels', [AdminController::class, 'resellerPanels']);
+    Route::get('/vtu-access', function () {
+        return view('admin.vtu-access');
+    });
 });
 
 // Protected admin API routes (JSON only)
@@ -63,12 +94,18 @@ Route::prefix('api')->middleware(['auth:sanctum', 'admin'])->group(function () {
     Route::get('/admin/orders/sms', [AdminController::class, 'listSmsOrders']);
     Route::get('/admin/orders/vtu', [AdminController::class, 'listVtuOrders']);
     Route::get('/admin/deposits', [AdminController::class, 'deposits']);
+    Route::get('/admin/deposits/pending', [AdminController::class, 'getPendingDeposits']);
     Route::put('/admin/deposits/{id}/status', [AdminController::class, 'updateDepositStatus']);
+    Route::get('/admin/transactions/refundable', [AdminController::class, 'getRefundableTransactions']);
+    Route::post('/admin/transactions/{id}/refund', [AdminController::class, 'refundTransaction']);
+    Route::put('/admin/transactions/{id}/status', [AdminController::class, 'updateTransactionStatus']);
+    Route::get('/admin/transactions/{id}/details', [AdminController::class, 'getTransactionWithDeposit']);
     Route::get('/admin/users/export.csv', [AdminController::class, 'exportUsersCsv']);
     Route::get('/admin/statistics', [AdminController::class, 'statistics']);
     Route::get('/admin/services', [AdminController::class, 'listApiServices']);
     Route::put('/admin/services/sms/{id}', [AdminController::class, 'updateSmsService']);
     Route::put('/admin/services/vtu/{id}', [AdminController::class, 'updateVtuService']);
+    Route::put('/admin/services/sms/{id}/balance', [AdminController::class, 'updateSmsProviderBalance']);
     Route::post('/admin/services/sms/{id}/refresh-balance', [AdminController::class, 'refreshSmsProviderBalance']);
     Route::post('/admin/services/sms/{id}/test', [AdminController::class, 'testSmsProvider']);
     Route::post('/admin/services/vtu/{id}/refresh-balance', [AdminController::class, 'refreshVtuProviderBalance']);

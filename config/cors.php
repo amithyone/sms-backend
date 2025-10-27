@@ -24,15 +24,24 @@ return [
         'http://localhost:3000',
         'http://127.0.0.1:5173',
         'http://127.0.0.1:3000',
-        // Live server domains (add your actual domains here)
+        // Live server domains (HTTPS)
         'https://fadsms.com',
         'https://www.fadsms.com',
+        'https://faddedsms.com',
+        'https://www.faddedsms.com',
+        // HTTP (for redirects)
+        'http://fadsms.com',
+        'http://www.fadsms.com',
+        'http://faddedsms.com',
+        'http://www.faddedsms.com',
         // Add any other domains you need
     ],
 
     'allowed_origins_patterns' => [
-        // Allow any subdomain of your main domain
+        // Allow any subdomain of fadsms.com
         '/^https:\/\/([a-z0-9-]+\.)*fadsms\.com$/i',
+        // Allow any subdomain of faddedsms.com
+        '/^https:\/\/([a-z0-9-]+\.)*faddedsms\.com$/i',
         // Allow any localhost with any port
         '/^http:\/\/localhost(:\d+)?$/',
         '/^http:\/\/127\.0\.0\.1(:\d+)?$/',

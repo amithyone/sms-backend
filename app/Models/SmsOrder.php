@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Log;
 
 class SmsOrder extends Model
 {
@@ -128,7 +129,50 @@ class SmsOrder extends Model
 
     public function markAsExpired(): void
     {
+        // Update status to expired
         $this->update(['status' => self::STATUS_EXPIRED]);
+        
+        // Refund the user's balance
+        if ($this->cost > 0 && $this->user_id) {
+            try {
+                $user = User::find($this->user_id);
+                if ($user) {
+                    // Credit the user's balance
+                    $user->balance += $this->cost;
+                    $user->save();
+                    
+                    // Create a refund transaction record
+                    \App\Models\Transaction::create([
+                        'user_id' => $this->user_id,
+                        'type' => 'credit',
+                        'amount' => $this->cost,
+                        'description' => 'SMS Order Expired - Refund for ' . $this->getServiceDisplayName() . ' (' . $this->order_id . ')',
+                        'reference' => 'REFUND_' . $this->order_id,
+                        'status' => 'success',
+                        'balance_before' => $user->balance - $this->cost,
+                        'balance_after' => $user->balance,
+                        'metadata' => json_encode([
+                            'order_id' => $this->order_id,
+                            'phone_number' => $this->phone_number,
+                            'service' => $this->service,
+                            'reason' => 'expired_without_code'
+                        ])
+                    ]);
+                    
+                    \Log::info('SMS Order expired - Balance refunded', [
+                        'order_id' => $this->order_id,
+                        'user_id' => $this->user_id,
+                        'refund_amount' => $this->cost,
+                        'new_balance' => $user->balance
+                    ]);
+                }
+            } catch (\Exception $e) {
+                \Log::error('Failed to refund expired SMS order', [
+                    'order_id' => $this->order_id,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
     }
 
     public function markAsCancelled(): void

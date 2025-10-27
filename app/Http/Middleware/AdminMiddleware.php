@@ -15,8 +15,11 @@ class AdminMiddleware
      */
     public function handle(Request $request, Closure $next): Response
     {
+        // Get the authenticated user from the request (works with Sanctum)
+        $user = $request->user();
+        
         // Check if user is authenticated
-        if (!auth()->check()) {
+        if (!$user) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Authentication required'
@@ -24,7 +27,7 @@ class AdminMiddleware
         }
 
         // Check if user is admin or super admin
-        if (!auth()->user()->isAdmin()) {
+        if (!$user->isAdmin()) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Access denied. Admin privileges required.'

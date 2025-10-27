@@ -52,6 +52,16 @@ return [
         ],
     ],
 
+    'textverified' => [
+        'api_key' => env('TEXTVERIFIED_API_KEY'),
+        'username' => env('TEXTVERIFIED_API_USERNAME'),
+        'webhook_secret' => env('TEXTVERIFIED_WEBHOOK_SECRET'),
+    ],
+
+    'sim5' => [
+        'api_key' => env('5SIM_API_KEY'),
+    ],
+
     // Global FX and markup for SMS prices
     'sms_fx' => [
         'ngn_per_usd' => env('SMS_FX_NGN_PER_USD', 1600),
@@ -60,14 +70,22 @@ return [
         // Do not allow FX below this floor to avoid underpricing
         'min_ngn_per_usd' => env('SMS_FX_MIN_NGN_PER_USD', 1200),
         'providers' => [
-            // 'dassy' => 1600,
+            // Per-provider FX override
+            'dassy' => env('SMS_FX_DASSY_NGN_PER_USD', 1600),
         ],
     ],
     'sms_markup' => [
-        'percent' => env('SMS_MARKUP_PERCENT', 0),
+        'percent' => env('SMS_MARKUP_PERCENT', 10),
         'providers' => [
-            // 'dassy' => 10,
+            // Lower markup for Dassy if global is too aggressive
+            'dassy' => env('SMS_MARKUP_DASSY_PERCENT', 5),
         ],
+    ],
+
+    // Hard safety limits for SMS prices
+    'sms_price_limits' => [
+        'max_ngn' => (float) env('SMS_MAX_PRICE_NGN', 3000000),
+        'min_ngn' => (float) env('SMS_MIN_PRICE_NGN', 1500),
     ],
 
     /*
@@ -117,6 +135,29 @@ return [
             'secret_key' => env('PAYVIBE_SECRET_KEY'),
             'product_identifier' => env('PAYVIBE_PRODUCT_IDENTIFIER', 'sms'),
         ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | OAuth Services Configuration
+    |--------------------------------------------------------------------------
+    */
+
+    'google' => [
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+        'redirect' => env('GOOGLE_REDIRECT_URI', env('APP_URL') . '/auth/google/callback'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Feature Flags / Logging Toggles
+    |--------------------------------------------------------------------------
+    */
+
+    'logging' => [
+        // Toggle VTU/SMS request logging middleware
+        'vtu_sms' => (bool) env('LOG_VTU_SMS', false),
     ],
 
     /*

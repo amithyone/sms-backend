@@ -45,7 +45,7 @@ class PayvibeService
         ]);
     }
 
-    public function initiateVirtualAccount(int $userId, float $amount): array
+    public function initiateVirtualAccount(int $userId, ?float $amount = null): array
     {
         if (empty($this->baseUrl) || empty($this->secretKey)) {
             return [
@@ -54,12 +54,15 @@ class PayvibeService
             ];
         }
 
+        // Generate unique reference
+        $reference = 'PV_' . time() . '_' . $userId . '_' . rand(1000, 9999);
+
+        // Do NOT send amount so PayVibe accepts any transfer value; use webhook actuals later
         $payload = [
-            'amount' => $amount,
+            'reference' => $reference,
             'customer_reference' => 'USER_' . $userId,
             'product_identifier' => $this->productIdentifier,
-            // Optional: metadata to help reconcile
-            'metadata' => [ 'user_id' => $userId ],
+            'metadata' => [ 'user_id' => $userId, 'intended_amount' => $amount ],
         ];
 
         $url = $this->baseUrl . '/' . $this->virtualAccountEndpoint;
@@ -69,21 +72,24 @@ class PayvibeService
             $json = $resp->json();
 
             if ($resp->successful()) {
+                // Log the raw response for debugging
+                Log::info('PayVibe raw response', ['response' => $json]);
+                
                 // Try to normalize common response fields
                 $data = $json['data'] ?? $json;
                 return [
                     'success' => true,
                     'data' => [
-                        'reference' => (string)($data['reference'] ?? $data['ref'] ?? $data['transaction_reference'] ?? ''),
-                        'account_number' => (string)($data['account_number'] ?? $data['accountNumber'] ?? ''),
-                        'bank_name' => (string)($data['bank_name'] ?? $data['bankName'] ?? 'Wema Bank'),
-                        'account_name' => (string)($data['account_name'] ?? $data['accountName'] ?? 'PAYVIBE'),
-                        'amount' => (float)($data['amount'] ?? $amount),
-                        'charge' => (float)($data['charge'] ?? 0),
-                        'final_amount' => (float)($data['final_amount'] ?? ($data['amount'] ?? $amount)),
-                        'expiry' => (int)($data['expiry'] ?? $data['expires_in'] ?? 0),
-                        'transaction_id' => (string)($data['transaction_id'] ?? $data['id'] ?? ''),
-                    ],
+                        'reference' => (string)($data['reference'] ?? $data['ref'] ?? $data['transaction_reference'] ?? $reference ?? ''),
+                        'account_number' => (string)($data['virtual_account_number'] ?? $data['account_number'] ?? $data['accountNumber'] ?? $data['accountno'] ?? $data['account_no'] ?? ''),
+                        'bank_name' => (string)($data['bank_name'] ?? $data['bankName'] ?? $data['bank'] ?? 'Wema Bank'),
+                        'account_name' => (string)($data['account_name'] ?? $data['accountName'] ?? $data['name'] ?? 'Finspa/PAYVIBE'),
+                        'amount' => isset($data['amount']) ? (float)$data['amount'] : null,
+                        'charge' => isset($data['charge']) ? (float)$data['charge'] : null,
+                        'final_amount' => isset($data['final_amount']) ? (float)$data['final_amount'] : null,
+                        'expiry' => (int)($data['expiry'] ?? $data['expires_in'] ?? $data['duration'] ?? 0),
+                        'transaction_id' => (string)($data['transaction_id'] ?? $data['id'] ?? $data['txn_id'] ?? ''),
+                    ]
                 ];
             }
 

@@ -75,6 +75,17 @@ class SmsService extends Model
         $this->update(['balance' => $amount, 'last_balance_check' => now()]);
     }
 
+    public function deductBalance(float $amount): void
+    {
+        $newBalance = max(0, $this->balance - $amount);
+        $this->update(['balance' => $newBalance, 'last_balance_check' => now()]);
+    }
+
+    public function hasLowBalance(float $threshold = 5.0): bool
+    {
+        return $this->balance < $threshold;
+    }
+
     public function updateSuccessRate(): void
     {
         if ($this->total_orders > 0) {

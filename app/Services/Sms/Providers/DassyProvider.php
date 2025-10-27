@@ -46,23 +46,33 @@ class DassyProvider implements ProviderInterface
 
     public function getServices(SmsService $smsService, string $country): array
     {
+        // DASSY only supports US (187) - reject all other countries
+        $dassyCountryCode = $this->mapFrontendToDassyCountry($country);
+        Log::info('DASSY getServices called', ['country' => $country, 'mapped' => $dassyCountryCode]);
+        if ($dassyCountryCode !== '187') {
+            Log::info('DASSY rejecting non-US country', ['country' => $country, 'mapped' => $dassyCountryCode]);
+            return [];
+        }
+        
         $config = $smsService->getApiConfig();
         $url = $config['api_url'] . '?api_key=' . urlencode($config['api_key']) . '&action=getPrices';
         $response = $this->httpClient->get($url);
         if ($response->successful()) {
             $data = $response->json();
-            if (is_array($data) && isset($data[$country])) {
+            
+            if (is_array($data) && isset($data[$dassyCountryCode])) {
                 $services = [];
-                foreach ($data[$country] as $serviceCode => $serviceData) {
+                foreach ($data[$dassyCountryCode] as $serviceCode => $serviceData) {
                     if (is_array($serviceData) && isset($serviceData['cost'])) {
                         $usd = (float)$serviceData['cost'];
-                        $ngn = $this->convertToNgn($usd, 'dassy');
+                        // IMPORTANT: Return RAW USD. Controller will convert once.
                         $services[] = [
                             'service' => $serviceCode,
                             'name' => strtoupper($serviceCode),
-                            'cost' => $ngn,
+                            'cost' => $usd,
                             'count' => (int)($serviceData['count'] ?? 0),
-                            'currency' => 'NGN',
+                            // Daisy/SMS-activate style APIs typically quote in RUB. Mark RUB so controller converts correctly.
+                            'currency' => 'RUB',
                         ];
                     }
                 }
@@ -75,8 +85,14 @@ class DassyProvider implements ProviderInterface
 
     public function createOrder(SmsService $smsService, string $country, string $service): array
     {
+        // DASSY only supports US (187) - reject all other countries
+        $dassyCountryCode = $this->mapFrontendToDassyCountry($country);
+        if ($dassyCountryCode !== '187') {
+            throw new Exception("DASSY only supports US numbers, not {$country}");
+        }
+        
         $config = $smsService->getApiConfig();
-        $url = $config['api_url'] . '?api_key=' . urlencode($config['api_key']) . '&action=getNumber&service=' . urlencode($service) . '&country=' . urlencode($country);
+        $url = $config['api_url'] . '?api_key=' . urlencode($config['api_key']) . '&action=getNumber&service=' . urlencode($service) . '&country=' . urlencode($dassyCountryCode);
         $response = $this->httpClient->get($url);
         if ($response->successful()) {
             $body = trim($response->body());
@@ -112,7 +128,10 @@ class DassyProvider implements ProviderInterface
                 if (count($parts) >= 2) return $parts[1];
             }
             if ($body === 'STATUS_WAIT_CODE') return null;
-            if ($body === 'STATUS_CANCEL') return null;
+            // Surface cancellations/expirations as exceptions so controller can auto-cancel/refund
+            if ($body === 'STATUS_CANCEL' || stripos($body, 'CANCEL') !== false || stripos($body, 'EXPIRED') !== false) {
+                throw new Exception($body);
+            }
         }
         return null;
     }
@@ -158,21 +177,57 @@ class DassyProvider implements ProviderInterface
         return ['', 'Country ' . $daisyCode];
     }
 
+    private function mapFrontendToDassyCountry(string $frontendCountry): string
+    {
+        // Map frontend country codes (us, uk, etc.) to DASSY numeric codes
+        $map = [
+            'us' => '187',  // United States
+            'uk' => '44',   // United Kingdom (if available)
+            'ca' => '1',    // Canada (if available)
+            'au' => '61',   // Australia (if available)
+            // Add more mappings as needed
+        ];
+        
+        $lowerCountry = strtolower($frontendCountry);
+        return $map[$lowerCountry] ?? $frontendCountry; // Return original if no mapping found
+    }
+
     /**
      * Convert USD provider price to NGN using global config and markup
+     * IMPORTANT: Enforces minimum price of ₦1500 for all SMS services
      */
     private function convertToNgn(float $usd, string $provider): float
     {
-        $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
-        $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
-        if ($provFx > 0) { $fx = $provFx; }
+        // For Dassy: Simple rule - add 50% on USD then convert to NGN using FX
+        if ($provider === 'dassy') {
+            $fxDefault = (float) config('services.sms_fx.ngn_per_usd', 1600);
+            $fxOverride = (float) config('services.sms_fx.providers.dassy', 0);
+            $fx = $fxOverride > 0 ? $fxOverride : $fxDefault;
+            $ngn = (float) ceil($usd * 1.5 * $fx);
 
-        $markup = (float) (config('services.sms_markup.percent', 0));
+            // Apply global clamps
+            $min = (float) config('services.sms_price_limits.min_ngn', 1500);
+            $max = (float) config('services.sms_price_limits.max_ngn', 3000000);
+            if ($ngn < $min) { $ngn = $min; }
+            if ($ngn > $max) { $ngn = $max; }
+            return $ngn;
+        }
+
+        // Default logic for other providers (FX + markup + optional VAT + min)
+        $fx = (float) (config('services.sms_fx.ngn_per_usd', 1600));
+        $fxFloor = (float) (config('services.sms_fx.min_ngn_per_usd', 1200));
+        if ($fx < $fxFloor) { $fx = $fxFloor; }
+
+        $provFx = (float) (config("services.sms_fx.providers.{$provider}", 0));
+        if ($provFx > 0) { $fx = max($provFx, $fxFloor); }
+
+        $markup = (float) (config('services.sms_markup.percent', 10));
         $provMarkup = (float) (config("services.sms_markup.providers.{$provider}", -1));
         if ($provMarkup >= 0) { $markup = $provMarkup; }
 
         $ngn = $usd * $fx;
         if ($markup > 0) { $ngn *= (1 + $markup / 100); }
+
         // Fixed VAT/add-on from settings table (sms_vat), default NGN 700
         try {
             $vat = (float) (DB::table('settings')->where('key', 'sms_vat')->value('value') ?? 700);
@@ -180,6 +235,16 @@ class DassyProvider implements ProviderInterface
         } catch (\Throwable $e) {
             $ngn += 700; // fallback if settings table unavailable
         }
-        return (float) ceil($ngn);
+
+        // Round up to nearest 1 NGN
+        $ngn = (float) ceil($ngn);
+
+        // Enforce min/max clamps
+        $min = (float) config('services.sms_price_limits.min_ngn', 1500);
+        $max = (float) config('services.sms_price_limits.max_ngn', 3000000);
+        if ($ngn < $min) { $ngn = $min; }
+        if ($ngn > $max) { $ngn = $max; }
+
+        return $ngn;
     }
 }

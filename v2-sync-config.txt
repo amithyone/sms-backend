@@ -1,0 +1,18 @@
+FaddedSMS V2 Sync API Configuration
+Generated: 2025-10-08 13:28:03
+Updated: 2025-10-08 (New API Key)
+
+═══════════════════════════════════════
+V1 Site (This Site) - .env
+═══════════════════════════════════════
+V2_SYNC_API_KEY=dbc464775314a877cb5bf4dc6d16582db07ec0bc25ea0653167d9fb9ba2903f5
+
+═══════════════════════════════════════
+V2 Site (Old Site) - .env
+═══════════════════════════════════════
+V1_API_URL=https://api.fadsms.com/api/v2-sync
+V1_SYNC_API_KEY=dbc464775314a877cb5bf4dc6d16582db07ec0bc25ea0653167d9fb9ba2903f5
+
+═══════════════════════════════════════
+IMPORTANT: Keep this API key secure!
+═══════════════════════════════════════

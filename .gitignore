@@ -19,3 +19,7 @@ Thumbs.db
 
 /bootstrap/cache/*
 !/bootstrap/cache/.gitignore
+
+# Xtrapay implementation files
+XTRAPAY_INTEGRATION.md
+test_xtrapay_webhook.php

@@ -14,16 +14,19 @@ use App\Services\Sms\Providers\FiveSimProvider;
 use App\Services\Sms\Providers\DassyProvider;
 use App\Services\Sms\Providers\TextVerifiedProvider;
 use App\Services\Sms\Providers\SmsPoolProvider;
+use App\Services\ProviderMappingService;
 
 class SmsProviderService
 {
     private $httpClient;
+    private $mappingService;
     /** @var array<string, ProviderInterface> */
     private array $providers = [];
 
-    public function __construct()
+    public function __construct(ProviderMappingService $mappingService)
     {
         $this->httpClient = (new SimpleHttpClient())->timeout(30);
+        $this->mappingService = $mappingService;
         // Map provider keys to concrete implementations
         $this->providers = [
             SmsService::PROVIDER_TIGER_SMS => new TigerSmsProvider(),
@@ -71,20 +74,24 @@ class SmsProviderService
     {
         try {
             $config = $smsService->getApiConfig();
+            
+            // Map country code to provider-specific format
+            $mappedCountry = $this->mappingService->mapCountryCode($country, $smsService->provider);
+            
             // Delegate to provider class if available
             if (isset($this->providers[$smsService->provider])) {
-                return $this->providers[$smsService->provider]->getServices($smsService, $country);
+                return $this->providers[$smsService->provider]->getServices($smsService, $mappedCountry);
             }
             
             switch ($smsService->provider) {
                 case SmsService::PROVIDER_5SIM:
-                    return $this->get5SimServices($config, $country);
+                    return $this->get5SimServices($config, $mappedCountry);
                 case SmsService::PROVIDER_DASSY:
-                    return $this->getDassyServices($config, $country);
+                    return $this->getDassyServices($config, $mappedCountry);
                 case SmsService::PROVIDER_TIGER_SMS:
-                    return $this->getTigerSmsServices($config, $country);
+                    return $this->getTigerSmsServices($config, $mappedCountry);
                 case SmsService::PROVIDER_TEXTVERIFIED:
-                    return $this->getTextVerifiedServices($config, $country);
+                    return $this->getTextVerifiedServices($config, $mappedCountry);
                 default:
                     throw new Exception("Unsupported SMS provider: {$smsService->provider}");
             }
@@ -102,33 +109,40 @@ class SmsProviderService
         try {
             $config = $smsService->getApiConfig();
             
+            // Map country and service codes to provider-specific formats
+            $mappedCodes = $this->mappingService->mapCodes($country, $service, $smsService->provider);
+            $mappedCountry = $mappedCodes['country'];
+            $mappedService = $mappedCodes['service'];
+            
             Log::info("SmsProviderService: Creating order", [
                 'provider' => $smsService->provider,
                 'provider_name' => $smsService->name,
-                'country' => $country,
-                'service' => $service,
+                'original_country' => $country,
+                'original_service' => $service,
+                'mapped_country' => $mappedCountry,
+                'mapped_service' => $mappedService,
                 'has_api_key' => !empty($config['api_key'] ?? ''),
                 'has_username' => !empty($config['username'] ?? '')
             ]);
             
             // Delegate to provider class if available
             if (isset($this->providers[$smsService->provider])) {
-                return $this->providers[$smsService->provider]->createOrder($smsService, $country, $service);
+                return $this->providers[$smsService->provider]->createOrder($smsService, $mappedCountry, $mappedService);
             }
 
             switch ($smsService->provider) {
                 case SmsService::PROVIDER_5SIM:
                     Log::info("Calling 5Sim API");
-                    return $this->create5SimOrder($config, $country, $service);
+                    return $this->create5SimOrder($config, $mappedCountry, $mappedService);
                 case SmsService::PROVIDER_DASSY:
                     Log::info("Calling Dassy API");
-                    return $this->createDassyOrder($config, $country, $service);
+                    return $this->createDassyOrder($config, $mappedCountry, $mappedService);
                 case SmsService::PROVIDER_TIGER_SMS:
                     Log::info("Calling Tiger SMS API");
-                    return $this->createTigerSmsOrder($config, $country, $service);
+                    return $this->createTigerSmsOrder($config, $mappedCountry, $mappedService);
                 case SmsService::PROVIDER_TEXTVERIFIED:
                     Log::info("Calling TextVerified API");
-                    return $this->createTextVerifiedOrder($config, $country, $service);
+                    return $this->createTextVerifiedOrder($config, $mappedCountry, $mappedService);
                 default:
                     throw new Exception("Unsupported SMS provider: {$smsService->provider}");
             }
@@ -773,7 +787,28 @@ class SmsProviderService
             }
         }
 
-        throw new Exception('Failed to create 5Sim order: ' . $body);
+        // Handle specific 5SIM responses
+        if ($resp->successful()) {
+            if (stripos($body, '5SIM does not support country') !== false) {
+                Log::info('5SIM: Country not supported', [
+                    'country' => $country,
+                    'service' => $service,
+                    'response' => $body
+                ]);
+                throw new Exception('COUNTRY_NOT_SUPPORTED');
+            } elseif (stripos($body, 'NO_NUMBERS') !== false) {
+                Log::info('5SIM: No numbers available', [
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_NUMBERS');
+            } elseif (stripos($body, 'NO_MONEY') !== false) {
+                Log::warning('5SIM: Insufficient balance');
+                throw new Exception('NO_MONEY');
+            }
+        }
+
+        throw new Exception('Failed to create order: ' . $body);
     }
 
     private function get5SimSmsCode(array $config, string $orderId): ?string
@@ -943,13 +978,19 @@ class SmsProviderService
                 }
             }
             
-            // Handle error responses
+            // Handle business responses that are not errors
             if ($body === 'NO_NUMBERS') {
-                throw new Exception('No numbers available for this service');
+                Log::info('DaisySMS: No numbers available', [
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_NUMBERS');
             } elseif ($body === 'NO_MONEY') {
-                throw new Exception('Insufficient balance');
+                Log::warning('DaisySMS: Insufficient balance');
+                throw new Exception('NO_MONEY');
             } elseif ($body === 'TOO_MANY_ACTIVE_RENTALS') {
-                throw new Exception('Too many active rentals');
+                Log::warning('DaisySMS: Too many active rentals');
+                throw new Exception('TOO_MANY_ACTIVE_RENTALS');
             }
         }
         
@@ -959,7 +1000,7 @@ class SmsProviderService
             'body' => $response->body()
         ]);
         
-        throw new Exception('Failed to create DaisySMS order: ' . $response->body());
+        throw new Exception('Failed to create order: ' . $response->body());
     }
 
     private function getDassySmsCode(array $config, string $orderId): ?string
@@ -1169,7 +1210,8 @@ class SmsProviderService
             }
 
             $services[] = [
-                'name' => strtoupper($serviceCode),
+                // Use friendly name mapping for Tiger SMS abbreviations (e.g., wa -> WhatsApp)
+                'name' => $this->getServiceNameByCode($serviceCode),
                 'service' => $serviceCode,
                 'cost' => $cost !== null ? $cost : 0,
                 'count' => $count,
@@ -1225,12 +1267,43 @@ class SmsProviderService
                 }
             }
 
+            // Handle business responses that are not errors
+            $trimmedBody = trim($body);
+            Log::info('TigerSMS: Checking response', [
+                'original_body' => $body,
+                'trimmed_body' => $trimmedBody,
+                'body_length' => strlen($body),
+                'trimmed_length' => strlen($trimmedBody),
+                'is_no_numbers' => ($trimmedBody === 'NO_NUMBERS'),
+                'is_no_money' => ($trimmedBody === 'NO_MONEY'),
+                'is_no_balance' => ($trimmedBody === 'NO_BALANCE'),
+                'is_too_many' => ($trimmedBody === 'TOO_MANY_ACTIVE_RENTALS')
+            ]);
+            
+            if ($trimmedBody === 'NO_NUMBERS') {
+                Log::info('TigerSMS: No numbers available', [
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_NUMBERS');
+            } elseif ($trimmedBody === 'NO_MONEY' || $trimmedBody === 'NO_BALANCE') {
+                Log::warning('TigerSMS: Insufficient balance', [
+                    'response' => $body,
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_MONEY');
+            } elseif ($trimmedBody === 'TOO_MANY_ACTIVE_RENTALS') {
+                Log::warning('TigerSMS: Too many active rentals');
+                throw new Exception('TOO_MANY_ACTIVE_RENTALS');
+            }
+
             Log::error('TigerSMS getNumber unexpected response', [
                 'url' => $this->sanitizeUrl($url),
                 'status' => $response->status(),
                 'body' => $body,
             ]);
-            throw new Exception('Tiger SMS getNumber unexpected response: ' . $body);
+            throw new Exception('Unexpected response: ' . $body);
         }
 
         Log::error('TigerSMS getNumber HTTP failure', [
@@ -1238,7 +1311,7 @@ class SmsProviderService
             'status' => $response->status(),
             'body_sample' => substr($body, 0, 300),
         ]);
-        throw new Exception('Failed to create Tiger SMS order: HTTP ' . $response->status());
+        throw new Exception('Failed to create order: HTTP ' . $response->status());
     }
 
     private function getTigerSmsCode(array $config, string $orderId): ?string
@@ -1391,7 +1464,7 @@ class SmsProviderService
                 'status' => $response->status(),
                 'body_sample' => substr($response->body(), 0, 300),
             ]);
-            throw new Exception('Failed to create TextVerified order: HTTP ' . $response->status());
+            throw new Exception('Failed to create order: HTTP ' . $response->status());
         }
 
         $data = json_decode($response->body(), true);
@@ -1409,6 +1482,7 @@ class SmsProviderService
             'order_id' => $data['href'], // Use href as order_id for TextVerified
             'phone_number' => $verificationDetails['phoneNumber'] ?? '',
             'cost' => (float)($verificationDetails['cost'] ?? 0),
+            'currency' => 'USD',
             'status' => $verificationDetails['state'] ?? 'pending',
             'expires_at' => $verificationDetails['expiresAt'] ?? null
         ];

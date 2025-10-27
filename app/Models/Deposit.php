@@ -13,20 +13,22 @@ class Deposit extends Model
     protected $fillable = [
         'user_id',
         'amount',
-        'reference',
-        'payment_method',
-        'status',
-        'admin_note',
-        'processed_at',
-        'processed_by',
-        'payment_tracking',
         'charges',
+        'actual_amount',
+        'credit_amount',
+        'reference',
+        'status',
+        'metadata',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'charges' => 'decimal:2',
-        'processed_at' => 'datetime',
+        'actual_amount' => 'decimal:2',
+        'credit_amount' => 'decimal:2',
+        'metadata' => 'array',
+        'created_at' => 'datetime',
+        'updated_at' => 'datetime',
     ];
 
     /**
@@ -38,10 +40,35 @@ class Deposit extends Model
     }
 
     /**
-     * Get the admin who processed this deposit
+     * Get the admin who processed this deposit (from metadata)
      */
-    public function processedBy(): BelongsTo
+    public function getProcessedByAttribute()
     {
-        return $this->belongsTo(User::class, 'processed_by');
+        if (is_array($this->metadata) && isset($this->metadata['processed_by'])) {
+            return User::find($this->metadata['processed_by']);
+        }
+        return null;
+    }
+
+    /**
+     * Get admin note from metadata
+     */
+    public function getAdminNoteAttribute()
+    {
+        if (is_array($this->metadata) && isset($this->metadata['admin_note'])) {
+            return $this->metadata['admin_note'];
+        }
+        return null;
+    }
+
+    /**
+     * Get processed at timestamp from metadata
+     */
+    public function getProcessedAtAttribute()
+    {
+        if (is_array($this->metadata) && isset($this->metadata['processed_at'])) {
+            return $this->metadata['processed_at'];
+        }
+        return null;
     }
 }

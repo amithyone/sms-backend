@@ -84,6 +84,47 @@ class VtuNgService
 		return $this->http->withHeaders(['Authorization' => 'Bearer ' . $token]);
 	}
 
+	private function invalidateJwtToken(): void
+	{
+		Cache::forget('vtu_ng_jwt_token');
+	}
+
+	private function isAuthInvalidResponse($response): bool
+	{
+		try {
+			$status = (int) $response->status();
+			if ($status === 401 || $status === 403) { return true; }
+			$body = (string) $response->body();
+			if ($body !== '') {
+				$ub = strtolower($body);
+				if (str_contains($ub, 'token has been invalidated') || str_contains($ub, 'invalid token') || str_contains($ub, 'expired token')) {
+					return true;
+				}
+			}
+			$js = $response->json();
+			if (is_array($js)) {
+				$code = strtolower((string)($js['code'] ?? ''));
+				$msg = strtolower((string)($js['message'] ?? ''));
+				if ($code !== '' && (str_contains($code, 'jwt') || str_contains($code, 'token'))) { return true; }
+				if ($msg !== '' && (str_contains($msg, 'jwt') || str_contains($msg, 'token') || str_contains($msg, 'expired'))) { return true; }
+			}
+		} catch (\Throwable $e) {}
+		return false;
+	}
+
+	private function sendAuthed(string $method, string $url, ?array $payload = null)
+	{
+		$client = $this->authClient();
+		$response = strtoupper($method) === 'GET' ? $client->get($url) : $client->post($url, $payload ?? []);
+		if ($this->isAuthInvalidResponse($response)) {
+			Log::warning('VTU.ng auth invalid, refreshing token and retrying');
+			$this->invalidateJwtToken();
+			$client = $this->authClient();
+			$response = strtoupper($method) === 'GET' ? $client->get($url) : $client->post($url, $payload ?? []);
+		}
+		return $response;
+	}
+
 	private function getApiBase(): string
 	{
 		$root = rtrim($this->baseUrl, '/');
@@ -130,7 +171,6 @@ class VtuNgService
 	{
 		if (!$this->isConfigured()) { throw new Exception('VTU.ng not configured'); }
 		try {
-			$client = $this->authClient();
 			$url = $this->getApiBase() . 'airtime';
 			$payload = [
 				'request_id' => $reference,
@@ -138,7 +178,7 @@ class VtuNgService
 				'service_id' => strtolower($network),
 				'amount' => $amount,
 			];
-			$response = $client->post($url, $payload);
+			$response = $this->sendAuthed('POST', $url, $payload);
 			$data = $response->json();
 			return [
 				'success' => ($data['code'] ?? '') === 'success',
@@ -155,7 +195,6 @@ class VtuNgService
 	{
 		if (!$this->isConfigured()) { throw new Exception('VTU.ng not configured'); }
 		try {
-			$client = $this->authClient();
 			$url = $this->getApiBase() . 'data';
 			$payload = [
 				'request_id' => $reference,
@@ -163,7 +202,7 @@ class VtuNgService
 				'service_id' => strtolower($network),
 				'variation_id' => $plan,
 			];
-			$response = $client->post($url, $payload);
+			$response = $this->sendAuthed('POST', $url, $payload);
 			$data = $response->json();
 			if (($data['code'] ?? '') !== 'success') {
 				Log::error('VTU.ng data v2 returned failure', ['json' => $data]);
@@ -183,9 +222,8 @@ class VtuNgService
 	{
 		if (!$this->isConfigured()) { throw new Exception('VTU.ng not configured'); }
 		try {
-			$client = $this->authClient();
 			$url = $this->getApiBase() . 'requery';
-			$response = $client->post($url, ['request_id' => $reference]);
+			$response = $this->sendAuthed('POST', $url, ['request_id' => $reference]);
 			return $response->successful() ? $response->json() : ['status' => 'error'];
 		} catch (Exception $e) {
 			return ['status' => 'error', 'message' => $e->getMessage()];
@@ -196,9 +234,8 @@ class VtuNgService
 	{
 		if (!$this->isConfigured()) { return ['success' => false]; }
 		try {
-			$client = $this->authClient();
 			$url = $this->getApiBase() . 'balance';
-			$response = $client->get($url);
+			$response = $this->sendAuthed('GET', $url);
 			if ($response->successful()) {
 				$data = $response->json();
 				if (($data['code'] ?? '') === 'success') {
@@ -258,13 +295,12 @@ class VtuNgService
 	public function verifyCustomer(string $serviceId, string $customerId, ?string $variationId = null): array
 	{
 		if (!$this->isConfigured()) { throw new Exception('VTU.ng not configured'); }
-		$client = $this->authClient();
 		$url = $this->getApiBase() . 'verify-customer';
 		$last = null;
 		foreach ($this->bettingServiceIdCandidates($serviceId) as $sid) {
 			$payload = [ 'service_id' => $sid, 'customer_id' => $customerId ];
 			if ($variationId) { $payload['variation_id'] = $variationId; }
-			$resp = $client->post($url, $payload);
+			$resp = $this->sendAuthed('POST', $url, $payload);
 			$data = $resp->json();
 			if (($data['code'] ?? '') === 'success') {
 				return [ 'success' => true, 'data' => $data, 'message' => $data['message'] ?? 'Verified' ];
@@ -278,12 +314,11 @@ class VtuNgService
 	public function purchaseBetting(string $serviceId, string $customerId, float $amount, string $reference): array
 	{
 		if (!$this->isConfigured()) { throw new Exception('VTU.ng not configured'); }
-		$client = $this->authClient();
 		$url = $this->getApiBase() . 'betting';
 		$last = null;
 		foreach ($this->bettingServiceIdCandidates($serviceId) as $sid) {
 			$payload = [ 'request_id' => $reference, 'customer_id' => $customerId, 'service_id' => $sid, 'amount' => $amount ];
-			$resp = $client->post($url, $payload);
+			$resp = $this->sendAuthed('POST', $url, $payload);
 			$data = $resp->json();
 			if (($data['code'] ?? '') === 'success') {
 				return [ 'success' => true, 'data' => $data, 'message' => $data['message'] ?? 'Betting funded' ];
@@ -311,28 +346,148 @@ class VtuNgService
 
 	public function verifyElectricityCustomer(string $serviceId, string $customerId, ?string $variationId = null): array
 	{
-		$client = $this->authClient();
-		$url = $this->getApiBase() . 'verify-customer';
-		$payload = [ 'service_id' => $serviceId, 'customer_id' => $customerId ];
-		if ($variationId) { $payload['variation_id'] = $variationId; }
-		$resp = $client->post($url, $payload);
-		$data = $resp->json();
-		return [ 'success' => ($data['code'] ?? '') === 'success', 'data' => $data, 'message' => $data['message'] ?? '' ];
+		if (!$this->isConfigured()) { 
+			return [ 'success' => false, 'data' => null, 'message' => 'VTU.ng not configured' ];
+		}
+		
+		try {
+			$client = $this->authClient();
+			$url = $this->getApiBase() . 'verify-customer';
+			$payload = [ 'service_id' => $serviceId, 'customer_id' => $customerId ];
+			if ($variationId) { $payload['variation_id'] = $variationId; }
+			
+			$resp = $client->post($url, $payload);
+			$data = $resp->json();
+			
+			if (($data['code'] ?? '') === 'success') {
+				return [ 'success' => true, 'data' => $data, 'message' => $data['message'] ?? 'Customer verified successfully' ];
+			}
+			
+			Log::warning('VTU.ng electricity customer verification failed', [
+				'service_id' => $serviceId,
+				'customer_id' => $customerId,
+				'variation_id' => $variationId,
+				'response' => $data
+			]);
+			
+			return [ 'success' => false, 'data' => $data, 'message' => $data['message'] ?? 'Customer verification failed' ];
+		} catch (Exception $e) {
+			Log::error('VTU.ng electricity customer verification exception', [
+				'service_id' => $serviceId,
+				'customer_id' => $customerId,
+				'variation_id' => $variationId,
+				'error' => $e->getMessage()
+			]);
+			return [ 'success' => false, 'data' => null, 'message' => 'Verification failed: ' . $e->getMessage() ];
+		}
 	}
 
 	public function purchaseElectricity(string $serviceId, string $customerId, string $variationId, float $amount, string $reference): array
 	{
-		$client = $this->authClient();
-		$url = $this->getApiBase() . 'electricity';
-		$payload = [
-			'request_id' => $reference,
-			'customer_id' => $customerId,
+		if (!$this->isConfigured()) { 
+			return [ 'success' => false, 'data' => null, 'message' => 'VTU.ng not configured' ];
+		}
+		
+		try {
+			$url = $this->getApiBase() . 'electricity';
+			$payload = [
+				'request_id' => $reference,
+				'customer_id' => $customerId,
+				'service_id' => $serviceId,
+				'variation_id' => $variationId,
+				'amount' => $amount,
+			];
+			
+			$resp = $this->sendAuthed('POST', $url, $payload);
+			$data = $resp->json();
+			
+		if (($data['code'] ?? '') === 'success') {
+			return [ 'success' => true, 'data' => $data, 'message' => $data['message'] ?? 'Electricity purchase successful' ];
+		}
+		
+		// Check if the error is a timeout/slow operation error from VTU.ng response
+		$errorMessage = $data['error'] ?? $data['message'] ?? '';
+		$isTimeoutError = stripos($errorMessage, 'timeout') !== false 
+			|| stripos($errorMessage, 'too slow') !== false
+			|| stripos($errorMessage, 'less than') !== false
+			|| stripos($errorMessage, 'transferred the last') !== false
+			|| stripos($errorMessage, 'timed out') !== false
+			|| stripos($errorMessage, 'connection timeout') !== false
+			|| stripos($errorMessage, 'operation too slow') !== false;
+		
+		if ($isTimeoutError) {
+			Log::warning('VTU.ng electricity purchase timeout - likely processing', [
+				'service_id' => $serviceId,
+				'customer_id' => $customerId,
+				'variation_id' => $variationId,
+				'amount' => $amount,
+				'reference' => $reference,
+				'response' => $data,
+				'timeout_detected' => true
+			]);
+			
+			// Return processing status - the request is likely still being processed by VTU.ng
+			return [ 
+				'success' => false, 
+				'processing' => true,
+				'data' => $data, 
+				'message' => 'Request sent but VTU.ng response timeout - transaction is processing. Check status in a few minutes.',
+				'status' => 'processing'
+			];
+		}
+		
+		// For other errors (not timeout), mark as failed
+		Log::warning('VTU.ng electricity purchase failed', [
 			'service_id' => $serviceId,
+			'customer_id' => $customerId,
 			'variation_id' => $variationId,
 			'amount' => $amount,
-		];
-		$resp = $client->post($url, $payload);
-		$data = $resp->json();
-		return [ 'success' => ($data['code'] ?? '') === 'success', 'data' => $data, 'message' => $data['message'] ?? '' ];
+			'reference' => $reference,
+			'response' => $data
+		]);
+		
+		return [ 'success' => false, 'data' => $data, 'message' => $data['message'] ?? 'Electricity purchase failed' ];
+		} catch (Exception $e) {
+			$errorMessage = $e->getMessage();
+			
+			// Check if error is timeout/slow operation - these are usually still processing
+			$isTimeoutError = stripos($errorMessage, 'timeout') !== false 
+				|| stripos($errorMessage, 'too slow') !== false
+				|| stripos($errorMessage, 'less than') !== false
+				|| stripos($errorMessage, 'transferred the last') !== false
+				|| stripos($errorMessage, 'timed out') !== false
+				|| stripos($errorMessage, 'connection timeout') !== false;
+			
+			if ($isTimeoutError) {
+				Log::warning('VTU.ng electricity purchase timeout - likely processing', [
+					'service_id' => $serviceId,
+					'customer_id' => $customerId,
+					'variation_id' => $variationId,
+					'amount' => $amount,
+					'reference' => $reference,
+					'error' => $errorMessage
+				]);
+				
+				// Return processing status - the request is likely still being processed by VTU.ng
+				return [ 
+					'success' => false, 
+					'processing' => true,  // Special flag to indicate it's processing, not failed
+					'data' => null, 
+					'message' => 'Request sent but response timeout - transaction is processing. Check status in a few minutes.',
+					'status' => 'processing'
+				];
+			}
+			
+			// For other errors, mark as failed
+			Log::error('VTU.ng electricity purchase exception', [
+				'service_id' => $serviceId,
+				'customer_id' => $customerId,
+				'variation_id' => $variationId,
+				'amount' => $amount,
+				'reference' => $reference,
+				'error' => $errorMessage
+			]);
+			return [ 'success' => false, 'data' => null, 'message' => 'Purchase failed: ' . $errorMessage ];
+		}
 	}
 }

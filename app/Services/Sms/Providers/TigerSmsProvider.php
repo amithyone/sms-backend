@@ -190,12 +190,32 @@ class TigerSmsProvider implements ProviderInterface
                     ];
                 }
             }
+            
+            // Handle business responses that are not errors
+            if ($body === 'NO_NUMBERS') {
+                Log::info('TigerSMS: No numbers available', [
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_NUMBERS');
+            } elseif ($body === 'NO_MONEY' || $body === 'NO_BALANCE') {
+                Log::warning('TigerSMS: Insufficient balance', [
+                    'response' => $body,
+                    'service' => $service,
+                    'country' => $country
+                ]);
+                throw new Exception('NO_MONEY');
+            } elseif ($body === 'TOO_MANY_ACTIVE_RENTALS') {
+                Log::warning('TigerSMS: Too many active rentals');
+                throw new Exception('TOO_MANY_ACTIVE_RENTALS');
+            }
+            
             Log::error('TigerSMS getNumber unexpected response', [
                 'url' => $this->sanitizeUrl($url),
                 'status' => $response->status(),
                 'body' => $body,
             ]);
-            throw new Exception('Tiger SMS getNumber unexpected response: ' . $body);
+            throw new Exception('Unexpected response: ' . $body);
         }
 
         Log::error('TigerSMS getNumber HTTP failure', [
